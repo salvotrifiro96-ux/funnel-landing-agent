@@ -17,7 +17,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from agent.github_publish import GitHubConfig, publish_landing
-from agent.higgsfield import HiggsfieldCreds, HiggsfieldError, generate_hero_image
+from agent.image_gen import ImageGenError, generate_hero_image
 from agent.landing_gen import LandingBrief, LandingPage, generate_landing
 from agent.usage_log import ensure_schema as _ensure_usage_schema, log_event as _log_event
 
@@ -228,7 +228,7 @@ def _step_hero() -> None:
         "shallow depth of field."
     )
     st.session_state.hero_prompt = st.text_area(
-        "Prompt per Higgsfield Nano Banana Pro",
+        "Prompt immagine (Pollinations.ai · FLUX, gratuito)",
         value=st.session_state.hero_prompt or default_prompt,
         height=120,
         help="L'immagine viene generata in 16:9. Niente testo nell'immagine.",
@@ -239,16 +239,11 @@ def _step_hero() -> None:
         _set_step("content")
         st.rerun()
     if cols[1].button("🎨 Genera hero", type="primary"):
-        with st.spinner("Higgsfield sta generando l'immagine (1-2 min)…"):
+        with st.spinner("Generazione immagine in corso (~30s)…"):
             try:
-                creds = HiggsfieldCreds(
-                    clerk_client=_secret("HIGGSFIELD_CLERK_CLIENT"),
-                    session_id=_secret("HIGGSFIELD_SESSION_ID"),
-                )
                 img_bytes = generate_hero_image(
                     st.session_state.hero_prompt,
                     aspect="16:9",
-                    creds=creds,
                 )
                 st.session_state.hero_image_bytes = img_bytes
                 _log_event(
@@ -259,8 +254,8 @@ def _step_hero() -> None:
                         "image_kb": len(img_bytes) // 1024,
                     },
                 )
-            except HiggsfieldError as e:
-                st.session_state.error = f"Higgsfield error: {e}"
+            except ImageGenError as e:
+                st.session_state.error = f"Image generation error: {e}"
             except Exception as e:
                 st.session_state.error = f"Unexpected error: {e}\n\n{traceback.format_exc()}"
 
