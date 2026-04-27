@@ -33,25 +33,67 @@ class HiggsfieldError(RuntimeError):
 @dataclass(frozen=True)
 class HiggsfieldCreds:
     clerk_client: str
-    session_id: str
+    session_id: str = ""  # optional — auto-discovered from cookie if empty
 
     @classmethod
     def from_env(cls) -> "HiggsfieldCreds":
         clerk = os.getenv("HIGGSFIELD_CLERK_CLIENT", "").strip()
         sess = os.getenv("HIGGSFIELD_SESSION_ID", "").strip()
-        if not clerk or not sess:
-            raise HiggsfieldError(
-                "HIGGSFIELD_CLERK_CLIENT and HIGGSFIELD_SESSION_ID must be set"
-            )
+        if not clerk:
+            raise HiggsfieldError("HIGGSFIELD_CLERK_CLIENT must be set")
         return cls(clerk_client=clerk, session_id=sess)
 
 
-def _fresh_jwt(creds: HiggsfieldCreds) -> str:
-    r = requests.post(
-        f"{CLERK_URL}/v1/client/sessions/{creds.session_id}/tokens",
-        headers={"Cookie": f"__client={creds.clerk_client}"},
+def _discover_active_session_id(clerk_client: str) -> str:
+    """Ask Clerk for the active session ID using only the __client cookie.
+
+    Avoids the operator having to copy a separate sess_xxx every login.
+    """
+    r = requests.get(
+        f"{CLERK_URL}/v1/client",
+        headers={"Cookie": f"__client={clerk_client}"},
+        params={"__clerk_api_version": "2025-11-10"},
         timeout=10,
     )
+    if not r.ok:
+        raise HiggsfieldError(
+            f"Session auto-discovery failed ({r.status_code}). "
+            "Refresh HIGGSFIELD_CLERK_CLIENT cookie from higgsfield.ai."
+        )
+    sessions = r.json().get("response", {}).get("sessions", [])
+    active = next((s for s in sessions if s.get("status") == "active"), None)
+    if not active or not active.get("id"):
+        raise HiggsfieldError(
+            "No active Clerk session found. Refresh HIGGSFIELD_CLERK_CLIENT "
+            "cookie from higgsfield.ai (the cookie may be expired)."
+        )
+    return active["id"]
+
+
+def _resolve_session_id(creds: HiggsfieldCreds) -> str:
+    """Try the env-provided session_id first, fall back to auto-discovery."""
+    if creds.session_id:
+        return creds.session_id
+    return _discover_active_session_id(creds.clerk_client)
+
+
+def _post_token_refresh(session_id: str, clerk_client: str) -> requests.Response:
+    return requests.post(
+        f"{CLERK_URL}/v1/client/sessions/{session_id}/tokens",
+        headers={"Cookie": f"__client={clerk_client}"},
+        timeout=10,
+    )
+
+
+def _fresh_jwt(creds: HiggsfieldCreds) -> str:
+    session_id = _resolve_session_id(creds)
+    r = _post_token_refresh(session_id, creds.clerk_client)
+
+    # If env-provided session_id is stale (404), auto-discover and retry once.
+    if r.status_code == 404 and creds.session_id:
+        session_id = _discover_active_session_id(creds.clerk_client)
+        r = _post_token_refresh(session_id, creds.clerk_client)
+
     if not r.ok:
         raise HiggsfieldError(
             f"Clerk token refresh failed ({r.status_code}). "
