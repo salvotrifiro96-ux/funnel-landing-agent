@@ -18,6 +18,14 @@ import requests
 CLERK_URL = "https://clerk.higgsfield.ai"
 FNF_BASE = "https://fnf.higgsfield.ai"
 
+# Realistic Chrome User-Agent — Higgsfield fnf.* sits behind Cloudflare bot
+# protection and rejects vanilla `python-requests/...` UAs with a 403 challenge.
+DEFAULT_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
 ASPECT_FORMATS: dict[str, tuple[int, int]] = {
     "1:1": (1024, 1024),
     "16:9": (1024, 576),
@@ -34,14 +42,18 @@ class HiggsfieldError(RuntimeError):
 class HiggsfieldCreds:
     clerk_client: str
     session_id: str = ""  # optional — auto-discovered from cookie if empty
+    cf_clearance: str = ""  # Cloudflare bot-challenge cookie for fnf.higgsfield.ai
+    user_agent: str = DEFAULT_UA
 
     @classmethod
     def from_env(cls) -> "HiggsfieldCreds":
         clerk = os.getenv("HIGGSFIELD_CLERK_CLIENT", "").strip()
         sess = os.getenv("HIGGSFIELD_SESSION_ID", "").strip()
+        cf = os.getenv("HIGGSFIELD_CF_CLEARANCE", "").strip()
+        ua = os.getenv("HIGGSFIELD_USER_AGENT", "").strip() or DEFAULT_UA
         if not clerk:
             raise HiggsfieldError("HIGGSFIELD_CLERK_CLIENT must be set")
-        return cls(clerk_client=clerk, session_id=sess)
+        return cls(clerk_client=clerk, session_id=sess, cf_clearance=cf, user_agent=ua)
 
 
 def _discover_active_session_id(clerk_client: str) -> str:
@@ -102,11 +114,23 @@ def _fresh_jwt(creds: HiggsfieldCreds) -> str:
     return r.json()["jwt"]
 
 
-def _auth_headers(creds: HiggsfieldCreds) -> dict[str, str]:
-    return {
+def _fnf_headers(creds: HiggsfieldCreds) -> dict[str, str]:
+    """Headers for fnf.higgsfield.ai — needs realistic UA and CF clearance cookie."""
+    headers = {
         "Authorization": f"Bearer {_fresh_jwt(creds)}",
         "Content-Type": "application/json",
+        "User-Agent": creds.user_agent,
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://higgsfield.ai",
+        "Referer": "https://higgsfield.ai/",
     }
+    if creds.cf_clearance:
+        headers["Cookie"] = f"cf_clearance={creds.cf_clearance}"
+    return headers
+
+
+# Backwards-compat alias used by tests / external callers.
+_auth_headers = _fnf_headers
 
 
 def generate_hero_image(
