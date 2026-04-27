@@ -35,6 +35,7 @@ def _secret(key: str, default: str = "") -> str:
 
 
 ANTHROPIC_API_KEY = _secret("ANTHROPIC_API_KEY")
+OPENAI_API_KEY = _secret("OPENAI_API_KEY")
 APP_PASSWORD = _secret("APP_PASSWORD")
 
 st.set_page_config(page_title="Funnel Landing Agent", layout="wide", page_icon="🛬")
@@ -228,10 +229,16 @@ def _step_hero() -> None:
         "shallow depth of field."
     )
     st.session_state.hero_prompt = st.text_area(
-        "Prompt immagine (Pollinations.ai · FLUX, gratuito)",
+        "Prompt immagine (gpt-image-1 · 1536x1024)",
         value=st.session_state.hero_prompt or default_prompt,
         height=120,
         help="L'immagine viene generata in 16:9. Niente testo nell'immagine.",
+    )
+    quality = st.selectbox(
+        "Qualità immagine",
+        ["high", "medium", "low"],
+        index=0,
+        help="**high** ≈ €0.25 (consigliato per landing pubbliche) · **medium** ≈ €0.07 · **low** ≈ €0.02",
     )
 
     cols = st.columns([1, 1, 4])
@@ -239,11 +246,13 @@ def _step_hero() -> None:
         _set_step("content")
         st.rerun()
     if cols[1].button("🎨 Genera hero", type="primary"):
-        with st.spinner("Generazione immagine in corso (~30s)…"):
+        with st.spinner(f"gpt-image-1 sta generando l'hero ({quality})…"):
             try:
                 img_bytes = generate_hero_image(
                     st.session_state.hero_prompt,
+                    api_key=OPENAI_API_KEY,
                     aspect="16:9",
+                    quality=quality,
                 )
                 st.session_state.hero_image_bytes = img_bytes
                 _log_event(
@@ -251,6 +260,7 @@ def _step_hero() -> None:
                     payload={
                         "slug": partial.get("slug"),
                         "client_name": partial.get("client_name"),
+                        "quality": quality,
                         "image_kb": len(img_bytes) // 1024,
                     },
                 )
