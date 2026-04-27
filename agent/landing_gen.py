@@ -1,8 +1,9 @@
 """Landing page HTML generation with Claude.
 
-Produces a single self-contained `index.html` that uses Tailwind via CDN
-(no build step), embeds a hero image as <img>, and includes the operator's
-own form HTML verbatim.
+Claude acts as a world-class direct-response copywriter and produces a
+single self-contained `index.html` that uses Tailwind via CDN (no build
+step), embeds a hero image as <img>, and includes the operator's own
+form HTML verbatim.
 """
 from __future__ import annotations
 
@@ -17,20 +18,12 @@ CLAUDE_MODEL = "claude-opus-4-7"
 class LandingBrief:
     client_name: str
     slug: str
-    objective: str
-    target_audience: str
-    headline_hint: str
-    subheadline_hint: str
-    value_props: str
-    sections: tuple[str, ...]
-    primary_cta_label: str
-    secondary_info: str
+    project_context: str
     form_html: str
     brand_colors_hex: dict[str, str]
     font_family: str
     style_keywords: str
-    hero_image_path: str
-    favicon_url: str = ""
+    hero_image_path: str = "hero.jpg"
 
 
 @dataclass(frozen=True)
@@ -42,58 +35,64 @@ class LandingPage:
 
 def _system_prompt() -> str:
     return (
-        "You are a senior landing-page designer + copywriter. "
-        "Output a single complete `index.html` that uses Tailwind CSS via CDN "
-        "(`<script src=\"https://cdn.tailwindcss.com\"></script>`). "
-        "No build step, no external CSS files, no JS frameworks. "
-        "Inline minimal vanilla JS only if necessary (e.g., FAQ accordion).\n\n"
-        "HARD CONSTRAINTS:\n"
-        "1. Embed the operator's form HTML EXACTLY as provided — never modify "
+        "You are a world-class direct-response copywriter and conversion-focused "
+        "landing-page designer. You write copy at the level of David Ogilvy, "
+        "Gary Halbert, Eugene Schwartz, Dan Kennedy, and Joe Sugarman — applying "
+        "their principles: clear awareness-level targeting, single dominant "
+        "emotion per page, specific numbers over vague claims, AIDA structure, "
+        "social proof when warranted, scarcity/urgency only when legitimate, "
+        "objection handling, and a CTA that pairs an action verb with a concrete "
+        "benefit. You decide the headline, subheadline, body sections, bullet "
+        "points, and CTA copy based on the brief — the operator does not "
+        "pre-write copy.\n\n"
+        "OUTPUT — a single complete `index.html` that:\n"
+        "1. Loads Tailwind via CDN: <script src=\"https://cdn.tailwindcss.com\"></script>\n"
+        "2. Has no build step, no external CSS files, no JS frameworks. Inline "
+        "minimal vanilla JS only if needed (e.g., FAQ accordion, smooth scroll).\n"
+        "3. Embeds the operator's form HTML EXACTLY as provided — never change "
         "field names, action, method, hidden inputs, or button text.\n"
-        "2. Use the provided hero image path as <img src='hero.jpg'> with "
-        "responsive width and a meaningful alt.\n"
-        "3. Use the provided brand colors and font family. Configure Tailwind "
-        "with a small inline `tailwind.config` for primary/secondary/accent.\n"
-        "4. Mobile-first. Test mentally that everything reads on 360px width.\n"
-        "5. Single file. No external assets except hero.jpg, the favicon (if "
-        "provided), Tailwind CDN, and Google Fonts CDN for the chosen font.\n"
-        "6. Include <meta> tags: charset, viewport, title, description, og:title, "
-        "og:description, og:image (use hero.jpg), twitter:card.\n"
-        "7. Write copy in Italian unless the brief explicitly says otherwise.\n"
-        "8. Do not include placeholder Lorem Ipsum — invent concrete copy aligned "
-        "with the brief.\n\n"
-        "OUTPUT FORMAT — return ONLY a JSON object with these keys (no markdown):\n"
+        "4. Uses <img src=\"hero.jpg\" alt=\"...\"> for the hero image with a "
+        "meaningful alt text and responsive sizing.\n"
+        "5. Configures Tailwind with an inline `tailwind.config` mapping the "
+        "provided primary/secondary/accent colors to `brand-primary`, etc.\n"
+        "6. Loads the chosen Google Font and applies it as the body font.\n"
+        "7. Is mobile-first: every section reads cleanly at 360px width.\n"
+        "8. Includes a complete <head>: charset, viewport, title, description, "
+        "og:title, og:description, og:image (use hero.jpg), twitter:card.\n"
+        "9. Writes copy in Italian unless the brief explicitly says otherwise.\n"
+        "10. NEVER uses placeholder/Lorem Ipsum copy. Every word must be "
+        "intentional and aligned with the brief.\n"
+        "11. Decides which sections to include based on what the project needs "
+        "to convert: typical patterns are Hero → Promise → Proof/Authority → "
+        "Problem & Agitation → Solution & Mechanism → Outcome → Bonuses/"
+        "Guarantee → CTA → FAQ → Final CTA. Skip sections that have no real "
+        "supporting content from the brief — never fabricate testimonials, "
+        "fake numbers, or invented credentials.\n"
+        "12. Uses the form section as the primary conversion point. Place the "
+        "form prominently above the fold AND repeated lower on the page if it "
+        "helps conversion.\n\n"
+        "OUTPUT FORMAT — return ONLY a valid JSON object (no markdown, no "
+        "preamble) with these keys:\n"
         '  {"html": "<!DOCTYPE html>...", "page_title": "...", "meta_description": "..."}\n'
-        "page_title ≤ 60 chars, meta_description ≤ 155 chars."
+        "page_title ≤ 60 chars, meta_description ≤ 155 chars, both written for "
+        "click-through, not just SEO."
     )
 
 
 def _user_prompt(brief: LandingBrief) -> str:
     color_lines = "\n".join(f"  - {k}: {v}" for k, v in brief.brand_colors_hex.items())
-    sections_block = "\n".join(f"  - {s}" for s in brief.sections) if brief.sections else "  (no extra sections)"
     return f"""# Brief
 
-**Client**: {brief.client_name}
-**Slug** (URL path): {brief.slug}
-**Objective**: {brief.objective}
-**Target audience**: {brief.target_audience}
+## Cliente
+{brief.client_name}
 
-## Copy direction
-- Headline hint: {brief.headline_hint or '(free)'}
-- Subheadline hint: {brief.subheadline_hint or '(free)'}
-- Value props / benefits to cover:
-{brief.value_props}
+## Slug (URL path)
+{brief.slug}
 
-## Required sections (in order)
-{sections_block}
+## Contesto del progetto (libero — qui c'è tutto quello che serve sapere)
+{brief.project_context}
 
-## Primary CTA label
-{brief.primary_cta_label}
-
-## Secondary info / footer notes
-{brief.secondary_info or '(none)'}
-
-## Form HTML (embed VERBATIM, do not modify)
+## Form HTML (embed VERBATIM — non modificare action, method, name, value, hidden, button)
 ```html
 {brief.form_html}
 ```
@@ -101,14 +100,19 @@ def _user_prompt(brief: LandingBrief) -> str:
 ## Branding
 - Style keywords: {brief.style_keywords}
 - Font family (Google Fonts): {brief.font_family}
-- Brand colors:
+- Brand colors (HEX):
 {color_lines}
 
 ## Hero image
-Path: hero.jpg (already saved next to index.html)
-Aspect: 16:9, used in the hero section.
+Path relativo: hero.jpg (già salvato accanto a index.html). Aspect 16:9, da usare nel hero.
 
-Return ONLY the JSON object as instructed.
+---
+
+Sei tu il copywriter. Decidi struttura, headline, subheadline, sezioni, bullet,
+testimonial style/placement (solo se il brief offre proof reale — altrimenti
+salta), CTA, FAQ. Scrivi italiano persuasivo, concreto, anti-fuffa.
+
+Restituisci SOLO il JSON come da istruzioni di sistema.
 """
 
 

@@ -99,15 +99,6 @@ def _sidebar() -> None:
             placeholder="corso-meta-ads",
             help="L'URL finale sarà https://landing.tuodominio.it/pages/<slug>/",
         )
-        objective = st.text_input(
-            "Obiettivo della landing",
-            placeholder="Raccogliere lead per il corso Meta Ads di novembre",
-        )
-        target_audience = st.text_area(
-            "Target audience",
-            placeholder="Donne 30-45 in cerca di una svolta professionale dopo i figli",
-            height=80,
-        )
         st.markdown("**Branding**")
         primary = st.color_picker("Colore primario", value="#0A2540")
         secondary = st.color_picker("Colore secondario", value="#F4A261")
@@ -124,12 +115,7 @@ def _sidebar() -> None:
         submitted = st.form_submit_button("💾 Save brief", use_container_width=True)
 
     if submitted:
-        required = {
-            "Cliente": client_name,
-            "Slug": slug,
-            "Obiettivo": objective,
-            "Target": target_audience,
-        }
+        required = {"Cliente": client_name, "Slug": slug}
         missing = [k for k, v in required.items() if not v.strip()]
         if missing:
             st.sidebar.error(f"Mancano: {', '.join(missing)}")
@@ -137,8 +123,6 @@ def _sidebar() -> None:
         st.session_state.brief_partial = {
             "client_name": client_name.strip(),
             "slug": slug.strip().lower().replace(" ", "-"),
-            "objective": objective.strip(),
-            "target_audience": target_audience.strip(),
             "brand_colors_hex": {"primary": primary, "secondary": secondary, "accent": accent},
             "font_family": font_family,
             "style_keywords": style_keywords.strip(),
@@ -169,39 +153,45 @@ def _step_content() -> None:
         st.rerun()
         return
 
-    st.title("Step 1 · Contenuti & Form")
+    st.title("Step 1 · Brief progetto & form")
     st.caption(f"Cliente: **{partial['client_name']}** · Slug: `{partial['slug']}`")
+    st.markdown(
+        "Racconta il progetto in modo libero. Più contesto fornisci "
+        "(target reale, problemi che risolve, social proof, prezzi, deadline, "
+        "vincoli, tono di voce, risultati documentati), migliore sarà la "
+        "landing. Claude scrive headline, sottotitolo, bullet, struttura e "
+        "CTA basandosi su questo testo."
+    )
 
     with st.form("content_form"):
-        headline_hint = st.text_area(
-            "Headline guida (l'agente la raffinerà)",
-            height=60,
-            placeholder="Diventa Meta Ads Specialist in 8 settimane",
-        )
-        subheadline_hint = st.text_area(
-            "Sottotitolo guida",
-            height=60,
-            placeholder="Dal primo pixel al primo cliente fatturato — in italiano, senza fuffa.",
-        )
-        value_props = st.text_area(
-            "Bullet points / value props (uno per riga)",
-            height=140,
+        project_context = st.text_area(
+            "Contesto del progetto (libero, scrivi tutto quello che ti viene in mente)",
+            height=380,
             placeholder=(
-                "8 settimane di formazione live\n"
-                "Ti seguiamo fino al tuo primo cliente\n"
-                "Material e replay illimitati\n"
-                "Community privata da 200+ studenti"
+                "Esempio:\n"
+                "Workshop online di 90 minuti per imprenditori e freelance "
+                "che vogliono automatizzare il proprio lavoro con l'AI. "
+                "Si tiene il 15 maggio alle 19:00 in diretta su Zoom. "
+                "Costo: gratis, ma posti limitati a 200.\n\n"
+                "Target: imprenditori 35-55, fatturato 100k-1M, lavorano 60h/settimana, "
+                "perdono tempo in task ripetitivi (email, preventivi, fatture, "
+                "post social).\n\n"
+                "Obiettivo: lead per il follow-up commerciale del corso completo "
+                "(corso da 1497€ che parte a giugno).\n\n"
+                "Cosa imparano nel workshop:\n"
+                "- come riconoscere i task automatizzabili nel proprio business\n"
+                "- 5 tool AI gratuiti che usiamo internamente\n"
+                "- demo live di un'automazione email + lead scoring\n\n"
+                "Tono di voce: diretto, anti-fuffa, niente promesse di miracoli. "
+                "Diciamo apertamente che l'AI non sostituisce le persone ma le libera "
+                "dal lavoro morto.\n\n"
+                "Social proof disponibile: abbiamo formato 1200+ imprenditori dal 2022, "
+                "case study di Marco (architetto) che ha risparmiato 12 ore/settimana, "
+                "+47 testimonianze video sul sito principale.\n\n"
+                "Garanzia: nessuna, è gratis. Replay disponibile per 48h.\n\n"
+                "Vincoli: la landing deve essere mobile-first (80% del traffico viene da Meta Ads), "
+                "deve caricare in <2s, e il form deve avere solo nome + email + numero whatsapp."
             ),
-        )
-        sections_raw = st.multiselect(
-            "Sezioni opzionali da includere",
-            ["FAQ", "Testimonial", "Bonus / garanzia", "Chi siamo", "Programma dettagliato", "Video"],
-            default=["FAQ", "Testimonial"],
-        )
-        primary_cta = st.text_input("Etichetta CTA primaria", value="Iscriviti ora")
-        secondary_info = st.text_area(
-            "Info aggiuntive / disclaimer footer (opzionale)",
-            height=60,
         )
         st.markdown("**Form HTML** — incolla qui il codice del tuo form (rimane intatto):")
         form_html = st.text_area(
@@ -213,17 +203,12 @@ def _step_content() -> None:
         submitted = st.form_submit_button("➡️ Avanti: hero image", type="primary")
 
     if submitted:
-        if not value_props.strip() or not form_html.strip():
-            st.error("Value props e form HTML sono obbligatori.")
+        if not project_context.strip() or not form_html.strip():
+            st.error("Contesto del progetto e form HTML sono entrambi obbligatori.")
             return
         st.session_state.brief_partial = {
             **partial,
-            "headline_hint": headline_hint.strip(),
-            "subheadline_hint": subheadline_hint.strip(),
-            "value_props": value_props.strip(),
-            "sections": tuple(sections_raw),
-            "primary_cta_label": primary_cta.strip(),
-            "secondary_info": secondary_info.strip(),
+            "project_context": project_context.strip(),
             "form_html": form_html.strip(),
         }
         _set_step("hero")
@@ -235,11 +220,12 @@ def _step_hero() -> None:
     partial = st.session_state.get("brief_partial", {})
     st.caption(f"Cliente: **{partial.get('client_name','?')}** · Slug: `{partial.get('slug','?')}`")
 
+    project_summary = (partial.get("project_context") or "")[:400]
     default_prompt = (
-        f"editorial hero image for a landing page about {partial.get('objective','')}, "
-        f"target: {partial.get('target_audience','')}. "
+        f"editorial hero image for a landing page. Project context: {project_summary}. "
         f"Style: {partial.get('style_keywords','')}, photographic, soft natural light, "
-        "no text, 16:9, professional, optimistic mood."
+        "no text, 16:9, professional, optimistic mood, single focal subject, "
+        "shallow depth of field."
     )
     st.session_state.hero_prompt = st.text_area(
         "Prompt per Higgsfield Nano Banana Pro",
@@ -290,19 +276,11 @@ def _build_brief() -> LandingBrief:
     return LandingBrief(
         client_name=p["client_name"],
         slug=p["slug"],
-        objective=p["objective"],
-        target_audience=p["target_audience"],
-        headline_hint=p.get("headline_hint", ""),
-        subheadline_hint=p.get("subheadline_hint", ""),
-        value_props=p.get("value_props", ""),
-        sections=p.get("sections", ()),
-        primary_cta_label=p.get("primary_cta_label", "Iscriviti"),
-        secondary_info=p.get("secondary_info", ""),
-        form_html=p.get("form_html", ""),
+        project_context=p["project_context"],
+        form_html=p["form_html"],
         brand_colors_hex=p["brand_colors_hex"],
         font_family=p["font_family"],
         style_keywords=p["style_keywords"],
-        hero_image_path="hero.jpg",
     )
 
 
