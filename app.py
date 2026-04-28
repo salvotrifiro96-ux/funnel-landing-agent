@@ -409,6 +409,49 @@ def _compiled_html() -> str:
     return strip_skipped_image_slots(landing.html, _kept_slots())
 
 
+def _compiled_html_for_preview() -> str:
+    """Like _compiled_html but inlines kept images as data: URIs.
+
+    Streamlit's iframe cannot resolve `src="img-xxx.jpg"` (files only
+    exist after publish). For the local preview we replace those src
+    attributes with base64 data URIs so the operator actually sees the
+    images they uploaded/generated.
+    """
+    import base64
+    import re
+
+    html = _compiled_html()
+    images: dict[str, bytes] = st.session_state.get("slot_images") or {}
+    if not images:
+        return html
+
+    encoded: dict[str, str] = {
+        slot: "data:image/jpeg;base64," + base64.b64encode(payload).decode("ascii")
+        for slot, payload in images.items()
+        if payload
+    }
+
+    pattern = re.compile(
+        r'(<img\b[^>]*\bdata-img-slot=["\']([^"\']+)["\'][^>]*>)',
+        flags=re.IGNORECASE,
+    )
+
+    def rewrite(match: re.Match[str]) -> str:
+        tag, slot = match.group(1), match.group(2).strip().lower()
+        data_uri = encoded.get(slot)
+        if not data_uri:
+            return tag
+        return re.sub(
+            r'src=["\'][^"\']*["\']',
+            f'src="{data_uri}"',
+            tag,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    return pattern.sub(rewrite, html)
+
+
 def _step_preview() -> None:
     st.title("Step 4 · Anteprima")
     landing: LandingPage = st.session_state.landing
@@ -417,15 +460,35 @@ def _step_preview() -> None:
         st.rerun()
         return
 
-    html_compiled = _compiled_html()
-    st.components.v1.html(html_compiled, height=800, scrolling=True)
+    preview_html = _compiled_html_for_preview()
+
+    cols_top = st.columns([1, 3])
+    device = cols_top[0].radio(
+        "Anteprima",
+        ["🖥 Desktop", "📱 Mobile"],
+        horizontal=True,
+        key="preview_device",
+    )
+
+    if device == "📱 Mobile":
+        framed = (
+            '<div style="display:flex;justify-content:center;background:#1c1c1e;padding:24px 0;">'
+            '<div style="width:390px;height:780px;border:8px solid #111;border-radius:36px;'
+            'overflow:hidden;background:white;box-shadow:0 12px 40px rgba(0,0,0,.25);">'
+            f'<iframe style="width:100%;height:100%;border:none;" srcdoc="{preview_html.replace(chr(34), "&quot;")}"></iframe>'
+            '</div></div>'
+        )
+        st.components.v1.html(framed, height=820, scrolling=False)
+    else:
+        st.components.v1.html(preview_html, height=800, scrolling=True)
+
     n_kept = len(_kept_slots())
     n_total = len(landing.image_slots)
     if n_total:
         st.caption(f"Immagini attive: {n_kept}/{n_total}")
 
-    with st.expander("HTML sorgente (compilato)"):
-        st.code(html_compiled, language="html")
+    with st.expander("HTML sorgente (compilato, senza data-uri)"):
+        st.code(_compiled_html(), language="html")
 
     st.divider()
     st.subheader("✏️ Modifiche")
