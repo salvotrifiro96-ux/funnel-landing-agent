@@ -71,11 +71,17 @@ def _system_prompt() -> str:
         "12. Uses the form section as the primary conversion point. Place the "
         "form prominently above the fold AND repeated lower on the page if it "
         "helps conversion.\n\n"
-        "OUTPUT FORMAT — return ONLY a valid JSON object (no markdown, no "
-        "preamble) with these keys:\n"
-        '  {"html": "<!DOCTYPE html>...", "page_title": "...", "meta_description": "..."}\n'
-        "page_title ≤ 60 chars, meta_description ≤ 155 chars, both written for "
-        "click-through, not just SEO."
+        "OUTPUT FORMAT — return EXACTLY this structure, with the literal "
+        "delimiter lines, in this order, and NOTHING ELSE (no preamble, no "
+        "markdown fences, no trailing commentary):\n\n"
+        "===PAGE_TITLE===\n"
+        "<page title, ≤ 60 chars, written for click-through>\n"
+        "===META_DESCRIPTION===\n"
+        "<meta description, ≤ 155 chars, written for click-through>\n"
+        "===HTML===\n"
+        "<!DOCTYPE html>\n"
+        "...full HTML document...\n"
+        "===END===\n"
     )
 
 
@@ -116,6 +122,46 @@ Restituisci SOLO il JSON come da istruzioni di sistema.
 """
 
 
+_PT_DELIM = "===PAGE_TITLE==="
+_MD_DELIM = "===META_DESCRIPTION==="
+_HTML_DELIM = "===HTML==="
+_END_DELIM = "===END==="
+
+
+def _parse_delimited(text: str) -> LandingPage:
+    """Parse Claude's delimited output into a LandingPage.
+
+    Robust to leading/trailing whitespace and to a stray markdown fence.
+    """
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```", 2)[1]
+        if cleaned.startswith(("json", "html", "text")):
+            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
+        cleaned = cleaned.strip().rstrip("`").strip()
+
+    pt_idx = cleaned.find(_PT_DELIM)
+    md_idx = cleaned.find(_MD_DELIM)
+    html_idx = cleaned.find(_HTML_DELIM)
+    end_idx = cleaned.find(_END_DELIM)
+
+    if not (pt_idx != -1 and md_idx > pt_idx and html_idx > md_idx):
+        raise ValueError(
+            "Claude output did not contain expected delimiters "
+            f"(PAGE_TITLE/META_DESCRIPTION/HTML). Got: {cleaned[:300]}"
+        )
+
+    page_title = cleaned[pt_idx + len(_PT_DELIM): md_idx].strip()
+    meta_description = cleaned[md_idx + len(_MD_DELIM): html_idx].strip()
+    html_end = end_idx if end_idx > html_idx else len(cleaned)
+    html = cleaned[html_idx + len(_HTML_DELIM): html_end].strip()
+
+    if not html.lstrip().lower().startswith("<!doctype"):
+        raise ValueError("HTML section does not start with <!DOCTYPE html>")
+
+    return LandingPage(html=html, page_title=page_title, meta_description=meta_description)
+
+
 def generate_landing(api_key: str, brief: LandingBrief) -> LandingPage:
     """Call Claude with the brief and return a LandingPage. Raises on failure."""
     client = Anthropic(api_key=api_key)
@@ -126,18 +172,5 @@ def generate_landing(api_key: str, brief: LandingBrief) -> LandingPage:
         messages=[{"role": "user", "content": _user_prompt(brief)}],
     )
 
-    text = "".join(block.text for block in response.content if block.type == "text").strip()
-    if text.startswith("```"):
-        text = text.split("```", 2)[1]
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip().rstrip("`").strip()
-
-    import json
-
-    data = json.loads(text)
-    return LandingPage(
-        html=data["html"],
-        page_title=data["page_title"],
-        meta_description=data["meta_description"],
-    )
+    text = "".join(block.text for block in response.content if block.type == "text")
+    return _parse_delimited(text)
