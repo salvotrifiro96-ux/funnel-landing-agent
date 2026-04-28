@@ -71,7 +71,12 @@ def _system_prompt() -> str:
         "fake numbers, or invented credentials.\n"
         "12. Uses the form section as the primary conversion point. Place the "
         "form prominently above the fold AND repeated lower on the page if it "
-        "helps conversion.\n\n"
+        "helps conversion.\n"
+        "13. NEVER truncate or leave a section half-written. If you start a "
+        "section (FAQ, speaker bio, testimonials, bonuses, …), finish it fully. "
+        "If you are running out of room, drop a section entirely rather than "
+        "leaving it incomplete. The output must end with a properly closed "
+        "</body></html> followed by ===END===.\n\n"
         "OUTPUT FORMAT — return EXACTLY this structure, with the literal "
         "delimiter lines, in this order, and NOTHING ELSE (no preamble, no "
         "markdown fences, no trailing commentary):\n\n"
@@ -170,10 +175,15 @@ def generate_landing(api_key: str, brief: LandingBrief) -> LandingPage:
     client = Anthropic(api_key=api_key)
     response = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=8192,
+        max_tokens=24000,
         system=_system_prompt(),
         messages=[{"role": "user", "content": _user_prompt(brief)}],
     )
 
     text = "".join(block.text for block in response.content if block.type == "text")
+    if response.stop_reason == "max_tokens":
+        raise ValueError(
+            "Claude hit the max_tokens limit before finishing the page. "
+            "Shorten the brief, or raise max_tokens further."
+        )
     return _parse_delimited(text)
