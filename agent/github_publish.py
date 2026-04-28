@@ -104,13 +104,31 @@ def publish_landing(
     *,
     slug: str,
     html: str,
+    images: dict[str, bytes] | None = None,
 ) -> PublishResult:
+    """Publish HTML + optional per-slot images to the target repo.
+
+    `images` maps slot name → image bytes. Each is committed at
+    pages/<slug>/img-<slot>.jpg.
+    """
     cfg.ensure_complete()
     safe_slug = slug.strip().strip("/").lower()
     if not safe_slug:
         raise ValueError("slug cannot be empty")
 
     base_path = f"pages/{safe_slug}"
+
+    for slot, payload in (images or {}).items():
+        if not payload:
+            continue
+        slot_safe = slot.strip().lower().replace(" ", "_")
+        _put_file(
+            cfg,
+            path=f"{base_path}/img-{slot_safe}.jpg",
+            content_bytes=payload,
+            message=f"feat({safe_slug}): add image for slot {slot_safe}",
+        )
+
     html_sha = _put_file(
         cfg,
         path=f"{base_path}/index.html",

@@ -26,10 +26,17 @@ class LandingBrief:
 
 
 @dataclass(frozen=True)
+class ImageSlot:
+    name: str          # snake_case, e.g. "hero", "speaker", "benefit_1"
+    description: str   # short visual brief — fed to gpt-image-1 if user chooses generate
+
+
+@dataclass(frozen=True)
 class LandingPage:
     html: str
     page_title: str
     meta_description: str
+    image_slots: tuple[ImageSlot, ...] = ()
 
 
 def _system_prompt() -> str:
@@ -50,16 +57,22 @@ def _system_prompt() -> str:
         "minimal vanilla JS only if needed (e.g., FAQ accordion, smooth scroll).\n"
         "3. Embeds the operator's form HTML EXACTLY as provided — never change "
         "field names, action, method, hidden inputs, or button text.\n"
-        "4. Uses NO external images, NO photos, NO <img> tags. The hero "
-        "section relies on typography, gradients, color blocks, simple inline "
-        "SVG decorations, or CSS patterns — design must work without any image "
-        "asset. This is intentional: keeps the page fast and asset-free.\n"
+        "4. Identifies up to 6 sections where an image would meaningfully boost "
+        "conversion (hero, speaker portrait, top benefits, testimonial avatar, "
+        "bonus visual, etc.) and includes for each one an <img> tag of the form:\n"
+        "   <img src=\"img-<slot>.jpg\" alt=\"...\" data-img-slot=\"<slot>\" class=\"...\">\n"
+        "where <slot> is a short snake_case name. The page must also work "
+        "WITHOUT those images (the operator may skip any slot) — so size and "
+        "position the <img>s so that removing them does not break the layout. "
+        "Use `bg-gradient-to-*` / color blocks as graceful fallback in case the "
+        "image is skipped. NEVER reference any image other than img-<slot>.jpg.\n"
         "5. Configures Tailwind with an inline `tailwind.config` mapping the "
         "provided primary/secondary/accent colors to `brand-primary`, etc.\n"
         "6. Loads the chosen Google Font and applies it as the body font.\n"
         "7. Is mobile-first: every section reads cleanly at 360px width.\n"
         "8. Includes a complete <head>: charset, viewport, title, description, "
-        "og:title, og:description, twitter:card. Skip og:image (no image asset).\n"
+        "og:title, og:description, og:image (set to img-hero.jpg if a hero slot "
+        "exists, else omit), twitter:card.\n"
         "9. Writes copy in Italian unless the brief explicitly says otherwise.\n"
         "10. NEVER uses placeholder/Lorem Ipsum copy. Every word must be "
         "intentional and aligned with the brief.\n"
@@ -84,6 +97,10 @@ def _system_prompt() -> str:
         "<page title, ≤ 60 chars, written for click-through>\n"
         "===META_DESCRIPTION===\n"
         "<meta description, ≤ 155 chars, written for click-through>\n"
+        "===IMAGE_SLOTS===\n"
+        "<one slot per line — `slot_name | short visual description for image gen`>\n"
+        "<example: `hero | warm editorial photo of italian entrepreneur at desk, AI dashboards on screen, soft natural light`>\n"
+        "<list ONLY the slots you actually used in the HTML; if none, leave a single line: `(none)`>\n"
         "===HTML===\n"
         "<!DOCTYPE html>\n"
         "...full HTML document...\n"
@@ -132,14 +149,41 @@ Restituisci SOLO il JSON come da istruzioni di sistema.
 
 _PT_DELIM = "===PAGE_TITLE==="
 _MD_DELIM = "===META_DESCRIPTION==="
+_SLOTS_DELIM = "===IMAGE_SLOTS==="
 _HTML_DELIM = "===HTML==="
 _END_DELIM = "===END==="
+
+
+def _parse_image_slots(block: str) -> tuple[ImageSlot, ...]:
+    """Parse the IMAGE_SLOTS block: one `name | description` per line."""
+    slots: list[ImageSlot] = []
+    for raw_line in block.splitlines():
+        line = raw_line.strip()
+        if not line or line.lower() in ("(none)", "none"):
+            continue
+        if "|" not in line:
+            continue
+        name_raw, desc = line.split("|", 1)
+        name = name_raw.strip().lower().replace(" ", "_")
+        if not name:
+            continue
+        slots.append(ImageSlot(name=name, description=desc.strip()))
+    # Dedupe while preserving order.
+    seen: set[str] = set()
+    unique: list[ImageSlot] = []
+    for s in slots:
+        if s.name in seen:
+            continue
+        seen.add(s.name)
+        unique.append(s)
+    return tuple(unique)
 
 
 def _parse_delimited(text: str) -> LandingPage:
     """Parse Claude's delimited output into a LandingPage.
 
     Robust to leading/trailing whitespace and to a stray markdown fence.
+    Tolerates a missing IMAGE_SLOTS section for backwards compatibility.
     """
     cleaned = text.strip()
     if cleaned.startswith("```"):
@@ -150,6 +194,7 @@ def _parse_delimited(text: str) -> LandingPage:
 
     pt_idx = cleaned.find(_PT_DELIM)
     md_idx = cleaned.find(_MD_DELIM)
+    slots_idx = cleaned.find(_SLOTS_DELIM)
     html_idx = cleaned.find(_HTML_DELIM)
     end_idx = cleaned.find(_END_DELIM)
 
@@ -160,14 +205,48 @@ def _parse_delimited(text: str) -> LandingPage:
         )
 
     page_title = cleaned[pt_idx + len(_PT_DELIM): md_idx].strip()
-    meta_description = cleaned[md_idx + len(_MD_DELIM): html_idx].strip()
+
+    if slots_idx > md_idx and slots_idx < html_idx:
+        meta_description = cleaned[md_idx + len(_MD_DELIM): slots_idx].strip()
+        slots_block = cleaned[slots_idx + len(_SLOTS_DELIM): html_idx].strip()
+        slots = _parse_image_slots(slots_block)
+    else:
+        meta_description = cleaned[md_idx + len(_MD_DELIM): html_idx].strip()
+        slots = ()
+
     html_end = end_idx if end_idx > html_idx else len(cleaned)
     html = cleaned[html_idx + len(_HTML_DELIM): html_end].strip()
 
     if not html.lstrip().lower().startswith("<!doctype"):
         raise ValueError("HTML section does not start with <!DOCTYPE html>")
 
-    return LandingPage(html=html, page_title=page_title, meta_description=meta_description)
+    return LandingPage(
+        html=html,
+        page_title=page_title,
+        meta_description=meta_description,
+        image_slots=slots,
+    )
+
+
+def strip_skipped_image_slots(html: str, kept_slots: set[str]) -> str:
+    """Remove `<img ... data-img-slot="X" ...>` tags whose slot is not kept.
+
+    Conservative: only touches the <img> tag itself, leaves surrounding
+    markup intact. Claude is instructed to size sections so removal does
+    not break the layout.
+    """
+    import re
+
+    pattern = re.compile(
+        r'<img\b[^>]*\bdata-img-slot=["\']([^"\']+)["\'][^>]*/?>',
+        flags=re.IGNORECASE,
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        slot = match.group(1).strip().lower()
+        return match.group(0) if slot in kept_slots else ""
+
+    return pattern.sub(replace, html)
 
 
 def generate_landing(api_key: str, brief: LandingBrief) -> LandingPage:

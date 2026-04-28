@@ -16,7 +16,17 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from agent.github_publish import GitHubConfig, publish_landing
-from agent.landing_gen import LandingBrief, LandingPage, generate_landing
+from agent.image_gen import (
+    ImageGenError,
+    aspect_for_slot,
+    generate_image,
+)
+from agent.landing_gen import (
+    LandingBrief,
+    LandingPage,
+    generate_landing,
+    strip_skipped_image_slots,
+)
 from agent.usage_log import ensure_schema as _ensure_usage_schema, log_event as _log_event
 
 load_dotenv()
@@ -33,6 +43,7 @@ def _secret(key: str, default: str = "") -> str:
 
 
 ANTHROPIC_API_KEY = _secret("ANTHROPIC_API_KEY")
+OPENAI_API_KEY = _secret("OPENAI_API_KEY")
 APP_PASSWORD = _secret("APP_PASSWORD")
 
 st.set_page_config(page_title="Funnel Landing Agent", layout="wide", page_icon="🛬")
@@ -67,6 +78,9 @@ DEFAULT_STATE: dict[str, object] = {
     "step": "brief",
     "brief": None,
     "landing": None,
+    "slot_choices": {},   # {slot_name: 'skip' | 'upload' | 'generate'}
+    "slot_images": {},    # {slot_name: bytes}
+    "slot_prompts": {},   # {slot_name: prompt str}
     "publish_result": None,
     "error": None,
 }
@@ -260,31 +274,169 @@ def _step_generate() -> None:
         st.rerun()
     if cols[1].button("🔁 Re-generate"):
         st.session_state.landing = None
+        st.session_state.slot_choices = {}
+        st.session_state.slot_images = {}
+        st.session_state.slot_prompts = {}
         st.rerun()
-    if cols[2].button("👁 Anteprima → Pubblica", type="primary"):
+    next_label = "👁 Avanti" if not landing.image_slots else "🖼 Aggiungi immagini"
+    next_target = "preview" if not landing.image_slots else "images"
+    if cols[2].button(next_label, type="primary"):
+        _set_step(next_target)
+        st.rerun()
+
+
+def _step_images() -> None:
+    st.title("Step 3 · Immagini (opzionali)")
+    landing: LandingPage = st.session_state.landing
+    if not landing or not landing.image_slots:
+        _set_step("preview")
+        st.rerun()
+        return
+
+    st.markdown(
+        "Per ogni slot puoi: **saltarlo** (l'`<img>` viene rimosso, "
+        "il design si adatta), **caricare** un file dal tuo computer, oppure "
+        "**generarlo** con gpt-image-1 (~€0.02-0.25 a immagine)."
+    )
+
+    choices: dict[str, str] = dict(st.session_state.slot_choices)
+    images: dict[str, bytes] = dict(st.session_state.slot_images)
+    prompts: dict[str, str] = dict(st.session_state.slot_prompts)
+
+    for slot in landing.image_slots:
+        with st.container(border=True):
+            st.markdown(f"### Slot: `{slot.name}`")
+            st.caption(slot.description)
+
+            choice = st.radio(
+                "Cosa vuoi fare?",
+                ["skip", "upload", "generate"],
+                index=["skip", "upload", "generate"].index(choices.get(slot.name, "skip")),
+                horizontal=True,
+                key=f"choice_{slot.name}",
+                format_func=lambda x: {"skip": "🚫 Salta", "upload": "📤 Carica", "generate": "✨ Genera"}[x],
+            )
+            choices[slot.name] = choice
+
+            if choice == "upload":
+                uploaded = st.file_uploader(
+                    "Carica immagine (jpg/png)",
+                    type=["jpg", "jpeg", "png"],
+                    key=f"upload_{slot.name}",
+                )
+                if uploaded is not None:
+                    images[slot.name] = uploaded.getvalue()
+                    st.image(images[slot.name], use_container_width=True)
+                elif slot.name in images:
+                    st.image(images[slot.name], use_container_width=True)
+                    st.caption("(immagine già caricata)")
+
+            elif choice == "generate":
+                prompt_default = prompts.get(slot.name) or slot.description
+                prompt_value = st.text_area(
+                    "Prompt gpt-image-1",
+                    value=prompt_default,
+                    height=100,
+                    key=f"prompt_{slot.name}",
+                )
+                prompts[slot.name] = prompt_value
+                quality = st.selectbox(
+                    "Qualità",
+                    ["high", "medium", "low"],
+                    index=1,
+                    key=f"quality_{slot.name}",
+                    help="**high** ≈ €0.25 · **medium** ≈ €0.07 · **low** ≈ €0.02",
+                )
+                aspect = aspect_for_slot(slot.name)
+                st.caption(f"Aspect ratio: `{aspect}` (auto)")
+
+                if st.button(f"✨ Genera `{slot.name}`", key=f"gen_{slot.name}"):
+                    if not OPENAI_API_KEY:
+                        st.error("OPENAI_API_KEY non configurata nei secrets.")
+                    else:
+                        with st.spinner(f"gpt-image-1 → {slot.name} ({quality})…"):
+                            try:
+                                img_bytes = generate_image(
+                                    prompt_value,
+                                    api_key=OPENAI_API_KEY,
+                                    aspect=aspect,
+                                    quality=quality,
+                                )
+                                images[slot.name] = img_bytes
+                                _log_event(
+                                    "slot_image_generated",
+                                    payload={
+                                        "slot": slot.name,
+                                        "quality": quality,
+                                        "image_kb": len(img_bytes) // 1024,
+                                    },
+                                )
+                            except ImageGenError as e:
+                                st.session_state.error = f"Image generation error: {e}"
+                            except Exception as e:
+                                st.session_state.error = (
+                                    f"Unexpected error: {e}\n\n{traceback.format_exc()}"
+                                )
+
+                if slot.name in images:
+                    st.image(images[slot.name], use_container_width=True)
+            else:
+                images.pop(slot.name, None)
+
+    st.session_state.slot_choices = choices
+    st.session_state.slot_images = images
+    st.session_state.slot_prompts = prompts
+
+    cols = st.columns([1, 4])
+    if cols[0].button("⬅️ Genera HTML"):
+        _set_step("generate")
+        st.rerun()
+    if cols[1].button("👁 Anteprima → Pubblica", type="primary"):
         _set_step("preview")
         st.rerun()
 
 
+def _kept_slots() -> set[str]:
+    """Return the names of slots that have a real image attached."""
+    images: dict[str, bytes] = st.session_state.get("slot_images") or {}
+    return {name for name, payload in images.items() if payload}
+
+
+def _compiled_html() -> str:
+    """Return the HTML with `<img>` tags for skipped slots removed."""
+    landing: LandingPage = st.session_state.landing
+    return strip_skipped_image_slots(landing.html, _kept_slots())
+
+
 def _step_preview() -> None:
-    st.title("Step 3 · Anteprima")
+    st.title("Step 4 · Anteprima")
     landing: LandingPage = st.session_state.landing
     if not landing:
         _set_step("generate")
         st.rerun()
         return
 
-    st.components.v1.html(landing.html, height=800, scrolling=True)
+    html_compiled = _compiled_html()
+    st.components.v1.html(html_compiled, height=800, scrolling=True)
+    n_kept = len(_kept_slots())
+    n_total = len(landing.image_slots)
+    if n_total:
+        st.caption(f"Immagini attive: {n_kept}/{n_total}")
 
-    with st.expander("HTML sorgente"):
-        st.code(landing.html, language="html")
+    with st.expander("HTML sorgente (compilato)"):
+        st.code(html_compiled, language="html")
 
+    back_label = "⬅️ Immagini" if landing.image_slots else "⬅️ Generate"
+    back_target = "images" if landing.image_slots else "generate"
     cols = st.columns([1, 1, 3])
-    if cols[0].button("⬅️ Generate"):
-        _set_step("generate")
+    if cols[0].button(back_label):
+        _set_step(back_target)
         st.rerun()
     if cols[1].button("🔁 Re-generate"):
         st.session_state.landing = None
+        st.session_state.slot_choices = {}
+        st.session_state.slot_images = {}
+        st.session_state.slot_prompts = {}
         _set_step("generate")
         st.rerun()
     if cols[2].button("🚀 Pubblica su GitHub Pages", type="primary"):
@@ -293,7 +445,6 @@ def _step_preview() -> None:
 
 def _publish() -> None:
     brief = _build_brief()
-    landing: LandingPage = st.session_state.landing
 
     cfg = GitHubConfig(
         token=_secret("GITHUB_TOKEN"),
@@ -302,12 +453,18 @@ def _publish() -> None:
         base_url=_secret("LANDING_BASE_URL"),
     )
 
+    html_compiled = _compiled_html()
+    images: dict[str, bytes] = {
+        name: payload for name, payload in (st.session_state.slot_images or {}).items() if payload
+    }
+
     with st.spinner("Pubblicazione su GitHub Pages in corso…"):
         try:
             result = publish_landing(
                 cfg,
                 slug=brief.slug,
-                html=landing.html,
+                html=html_compiled,
+                images=images,
             )
             st.session_state.publish_result = result
             _log_event(
@@ -357,6 +514,8 @@ elif step == "content":
     _step_content()
 elif step == "generate":
     _step_generate()
+elif step == "images":
+    _step_images()
 elif step == "preview":
     _step_preview()
 elif step == "done":
