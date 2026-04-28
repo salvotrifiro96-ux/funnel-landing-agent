@@ -249,20 +249,14 @@ def strip_skipped_image_slots(html: str, kept_slots: set[str]) -> str:
     return pattern.sub(replace, html)
 
 
-def generate_landing(api_key: str, brief: LandingBrief) -> LandingPage:
-    """Call Claude with the brief and return a LandingPage. Raises on failure.
-
-    Uses streaming: the Anthropic SDK refuses non-streaming calls whose
-    max_tokens budget could push the operation past 10 minutes.
-    """
-    client = Anthropic(api_key=api_key)
+def _stream_to_landing(client: Anthropic, system: str, user_msg: str) -> LandingPage:
+    """Stream a single Claude call and parse the delimited landing output."""
     with client.messages.stream(
         model=CLAUDE_MODEL,
         max_tokens=24000,
-        system=_system_prompt(),
-        messages=[{"role": "user", "content": _user_prompt(brief)}],
+        system=system,
+        messages=[{"role": "user", "content": user_msg}],
     ) as stream:
-        # Drain the stream so the SDK accumulates the full message.
         for _ in stream.text_stream:
             pass
         final = stream.get_final_message()
@@ -274,3 +268,42 @@ def generate_landing(api_key: str, brief: LandingBrief) -> LandingPage:
             "Shorten the brief, or raise max_tokens further."
         )
     return _parse_delimited(text)
+
+
+def revise_landing(
+    *,
+    api_key: str,
+    brief: LandingBrief,
+    current: LandingPage,
+    feedback: str,
+) -> LandingPage:
+    """Apply natural-language edits to an existing landing.
+
+    Claude returns a full new version in the same delimited format. Slots
+    not mentioned in the feedback should be preserved verbatim.
+    """
+    client = Anthropic(api_key=api_key)
+    slot_names = ", ".join(s.name for s in current.image_slots) or "(none)"
+    user_msg = (
+        f"{_user_prompt(brief)}\n\n"
+        f"## Versione corrente della landing\n"
+        f"page_title: {current.page_title}\n"
+        f"meta_description: {current.meta_description}\n"
+        f"image_slots dichiarati: {slot_names}\n\n"
+        f"HTML attuale:\n"
+        f"---HTML_BEGIN---\n{current.html}\n---HTML_END---\n\n"
+        f"## Modifiche richieste\n{feedback.strip()}\n\n"
+        "Applica SOLO le modifiche richieste e restituisci la landing "
+        "AGGIORNATA nello stesso formato di sistema "
+        "(===PAGE_TITLE=== / ===META_DESCRIPTION=== / ===IMAGE_SLOTS=== / "
+        "===HTML=== / ===END===). Tutto ciò che il feedback non menziona "
+        "deve restare identico — testo, classi Tailwind, struttura, slot "
+        "immagine. Non aggiungere sezioni che il feedback non chiede."
+    )
+    return _stream_to_landing(client, _system_prompt(), user_msg)
+
+
+def generate_landing(api_key: str, brief: LandingBrief) -> LandingPage:
+    """Call Claude with the brief and return a LandingPage. Raises on failure."""
+    client = Anthropic(api_key=api_key)
+    return _stream_to_landing(client, _system_prompt(), _user_prompt(brief))

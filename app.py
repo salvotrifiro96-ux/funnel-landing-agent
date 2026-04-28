@@ -25,6 +25,7 @@ from agent.landing_gen import (
     LandingBrief,
     LandingPage,
     generate_landing,
+    revise_landing,
     strip_skipped_image_slots,
 )
 from agent.usage_log import ensure_schema as _ensure_usage_schema, log_event as _log_event
@@ -426,9 +427,73 @@ def _step_preview() -> None:
     with st.expander("HTML sorgente (compilato)"):
         st.code(html_compiled, language="html")
 
+    st.divider()
+    st.subheader("✏️ Modifiche")
+    st.markdown(
+        "Scrivi cosa vuoi cambiare in linguaggio naturale. Claude applica "
+        "solo quello che chiedi e lascia il resto invariato. Le immagini "
+        "già caricate per gli slot che restano vengono preservate."
+    )
+    feedback = st.text_area(
+        "Cosa vuoi modificare?",
+        key="revision_feedback_input",
+        height=120,
+        placeholder=(
+            "Es.\n"
+            "- rendi la headline più aggressiva e specifica sui risultati\n"
+            "- togli la sezione 'Chi siamo'\n"
+            "- aggiungi una sezione bonus subito sopra il form\n"
+            "- cambia il colore del bottone CTA in giallo brillante\n"
+            "- cambia tutta la copy della FAQ rendendola meno tecnica"
+        ),
+    )
+    if st.button("🔧 Applica modifiche", disabled=not feedback.strip(), type="primary"):
+        with st.spinner("Claude sta applicando le modifiche…"):
+            try:
+                updated = revise_landing(
+                    api_key=ANTHROPIC_API_KEY,
+                    brief=_build_brief(),
+                    current=landing,
+                    feedback=feedback,
+                )
+                # Preserve image bytes/choices for slots that still exist.
+                new_slot_names = {s.name for s in updated.image_slots}
+                st.session_state.slot_images = {
+                    k: v
+                    for k, v in (st.session_state.slot_images or {}).items()
+                    if k in new_slot_names
+                }
+                st.session_state.slot_choices = {
+                    k: v
+                    for k, v in (st.session_state.slot_choices or {}).items()
+                    if k in new_slot_names
+                }
+                st.session_state.slot_prompts = {
+                    k: v
+                    for k, v in (st.session_state.slot_prompts or {}).items()
+                    if k in new_slot_names
+                }
+                st.session_state.landing = updated
+                _log_event(
+                    "landing_revised",
+                    payload={
+                        "feedback_chars": len(feedback),
+                        "kept_slot_count": len(new_slot_names),
+                        "page_title": updated.page_title,
+                        "html_kb": len(updated.html) // 1024,
+                    },
+                )
+                st.rerun()
+            except Exception as e:
+                st.session_state.error = (
+                    f"Revision failed: {e}\n\n{traceback.format_exc()}"
+                )
+
+    st.divider()
+
     back_label = "⬅️ Immagini" if landing.image_slots else "⬅️ Generate"
     back_target = "images" if landing.image_slots else "generate"
-    cols = st.columns([1, 1, 3])
+    cols = st.columns([1, 1, 1, 2])
     if cols[0].button(back_label):
         _set_step(back_target)
         st.rerun()
@@ -439,7 +504,11 @@ def _step_preview() -> None:
         st.session_state.slot_prompts = {}
         _set_step("generate")
         st.rerun()
-    if cols[2].button("🚀 Pubblica su GitHub Pages", type="primary"):
+    if landing.image_slots:
+        if cols[2].button("🖼 Gestisci immagini"):
+            _set_step("images")
+            st.rerun()
+    if cols[3].button("🚀 Pubblica su GitHub Pages", type="primary"):
         _publish()
 
 
