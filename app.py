@@ -15,7 +15,12 @@ import traceback
 import streamlit as st
 from dotenv import load_dotenv
 
-from agent.github_publish import GitHubConfig, publish_landing
+from agent.github_publish import (
+    GitHubConfig,
+    SetupResult,
+    publish_landing,
+    setup_hosting_repo,
+)
 from agent.image_gen import (
     ImageGenError,
     aspect_for_slot,
@@ -84,6 +89,9 @@ DEFAULT_STATE: dict[str, object] = {
     "slot_prompts": {},   # {slot_name: prompt str}
     "publish_result": None,
     "error": None,
+    "hosting_mode": "quick",     # 'quick' or 'custom'
+    "hosting_custom": None,      # dict when mode='custom' and verified
+    "hosting_setup_result": None,  # SetupResult when 'custom' verified
 }
 for k, v in DEFAULT_STATE.items():
     if k not in st.session_state:
@@ -101,7 +109,120 @@ def _show_error_if_any() -> None:
         st.error(err)
 
 
+def _hosting_sidebar() -> None:
+    st.sidebar.title("🌐 Hosting")
+    mode = st.sidebar.radio(
+        "Dove pubblichi la landing?",
+        options=["quick", "custom"],
+        index=0 if st.session_state.get("hosting_mode", "quick") == "quick" else 1,
+        format_func=lambda m: {
+            "quick": "🚀 Link veloce (consigliato)",
+            "custom": "🌍 Dominio personalizzato",
+        }[m],
+        key="hosting_mode_radio",
+        help=(
+            "**Link veloce**: la landing va sul mio dominio "
+            "(landing.leonemasterschool.it/pages/<slug>/) — zero setup.\n\n"
+            "**Dominio personalizzato**: configura il TUO dominio "
+            "(es. landing.tuobrand.com). Serve un GitHub PAT e accesso DNS."
+        ),
+    )
+    st.session_state.hosting_mode = mode
+
+    if mode == "quick":
+        base = _secret("LANDING_BASE_URL", "")
+        if base:
+            st.sidebar.success(f"Le landing finiranno su `{base}/pages/<slug>/`")
+        return
+
+    # mode == "custom"
+    saved = st.session_state.get("hosting_custom") or {}
+    with st.sidebar.expander("⚙️ Setup dominio personalizzato", expanded=not saved):
+        st.markdown(
+            "1. Crea un GitHub Personal Access Token con scope `repo` "
+            "[qui](https://github.com/settings/tokens/new) (durata 90gg, "
+            "spunta `repo`).\n"
+            "2. Compila i campi qui sotto e clicca **Verifica & setup**.\n"
+            "3. Configura il DNS sul provider del tuo dominio "
+            "(istruzioni dopo la verifica)."
+        )
+        with st.form("hosting_custom_form"):
+            gh_token = st.text_input(
+                "GitHub PAT",
+                type="password",
+                value=saved.get("token", ""),
+            )
+            gh_user = st.text_input(
+                "GitHub username",
+                value=saved.get("username", ""),
+                placeholder="es. mario-rossi",
+            )
+            gh_repo = st.text_input(
+                "Nome repo per le landing",
+                value=saved.get("repo", "landing-pages"),
+                help="Verrà creato se non esiste (pubblico, richiesto da GitHub Pages free).",
+            )
+            base_url = st.text_input(
+                "URL base del dominio (con https://)",
+                value=saved.get("base_url", ""),
+                placeholder="https://landing.tuobrand.com",
+            )
+            submit = st.form_submit_button("✅ Verifica & setup", use_container_width=True)
+
+        if submit:
+            cfg = GitHubConfig(
+                token=gh_token.strip(),
+                username=gh_user.strip(),
+                repo=gh_repo.strip() or "landing-pages",
+                base_url=base_url.strip().rstrip("/"),
+            )
+            with st.spinner("Verifico credenziali e configuro il repo…"):
+                try:
+                    result: SetupResult = setup_hosting_repo(cfg)
+                    st.session_state.hosting_custom = {
+                        "token": cfg.token,
+                        "username": cfg.username,
+                        "repo": cfg.repo,
+                        "base_url": cfg.base_url,
+                    }
+                    st.session_state.hosting_setup_result = result
+                    _log_event(
+                        "hosting_custom_setup",
+                        payload={
+                            "username": cfg.username,
+                            "repo": cfg.repo,
+                            "domain": result.custom_domain,
+                            "repo_existed": result.repo_existed,
+                        },
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"Setup fallito: {e}")
+
+    result = st.session_state.get("hosting_setup_result")
+    if result and st.session_state.hosting_custom:
+        st.sidebar.success(f"Repo `{st.session_state.hosting_custom['repo']}` pronto.")
+        with st.sidebar.expander("📡 Istruzioni DNS", expanded=False):
+            st.markdown(
+                f"Sul provider DNS del dominio `{result.custom_domain}` "
+                "aggiungi questo record:\n\n"
+                f"- **Tipo**: `CNAME`\n"
+                f"- **Nome / Host**: `{result.custom_domain.split('.')[0]}` "
+                "(o lascia vuoto / `@` se il dominio è già esattamente quello)\n"
+                f"- **Valore / Punta a**: `{result.cname_target}`\n"
+                "- **TTL**: default\n\n"
+                "Propagazione DNS: 5–30 minuti. Dopo la prima pubblicazione "
+                "GitHub abilita HTTPS automaticamente."
+            )
+        if st.sidebar.button("🔄 Ricomincia setup hosting"):
+            st.session_state.hosting_custom = None
+            st.session_state.hosting_setup_result = None
+            st.rerun()
+
+
 def _sidebar() -> None:
+    _hosting_sidebar()
+    st.sidebar.divider()
     st.sidebar.title("🛬 Brief")
     with st.sidebar.form("brief_form"):
         client_name = st.text_input("Cliente", placeholder="Leone Master School")
@@ -575,15 +696,37 @@ def _step_preview() -> None:
         _publish()
 
 
-def _publish() -> None:
-    brief = _build_brief()
-
-    cfg = GitHubConfig(
+def _resolve_publish_config() -> GitHubConfig:
+    """Pick the GitHub config based on the user's hosting choice in the sidebar."""
+    if st.session_state.get("hosting_mode") == "custom":
+        custom = st.session_state.get("hosting_custom") or {}
+        if not custom:
+            raise RuntimeError(
+                "Hai scelto 'Dominio personalizzato' ma non hai completato il "
+                "setup nella sidebar. Verifica & setup, poi riprova."
+            )
+        return GitHubConfig(
+            token=custom["token"],
+            username=custom["username"],
+            repo=custom["repo"],
+            base_url=custom["base_url"].rstrip("/"),
+        )
+    return GitHubConfig(
         token=_secret("GITHUB_TOKEN"),
         username=_secret("GITHUB_USERNAME"),
         repo=_secret("GITHUB_PAGES_REPO"),
-        base_url=_secret("LANDING_BASE_URL"),
+        base_url=_secret("LANDING_BASE_URL").rstrip("/"),
     )
+
+
+def _publish() -> None:
+    brief = _build_brief()
+
+    try:
+        cfg = _resolve_publish_config()
+    except RuntimeError as e:
+        st.session_state.error = str(e)
+        return
 
     html_compiled = _compiled_html()
     images: dict[str, bytes] = {
