@@ -250,17 +250,25 @@ def strip_skipped_image_slots(html: str, kept_slots: set[str]) -> str:
 
 
 def generate_landing(api_key: str, brief: LandingBrief) -> LandingPage:
-    """Call Claude with the brief and return a LandingPage. Raises on failure."""
+    """Call Claude with the brief and return a LandingPage. Raises on failure.
+
+    Uses streaming: the Anthropic SDK refuses non-streaming calls whose
+    max_tokens budget could push the operation past 10 minutes.
+    """
     client = Anthropic(api_key=api_key)
-    response = client.messages.create(
+    with client.messages.stream(
         model=CLAUDE_MODEL,
         max_tokens=24000,
         system=_system_prompt(),
         messages=[{"role": "user", "content": _user_prompt(brief)}],
-    )
+    ) as stream:
+        # Drain the stream so the SDK accumulates the full message.
+        for _ in stream.text_stream:
+            pass
+        final = stream.get_final_message()
 
-    text = "".join(block.text for block in response.content if block.type == "text")
-    if response.stop_reason == "max_tokens":
+    text = "".join(block.text for block in final.content if block.type == "text")
+    if final.stop_reason == "max_tokens":
         raise ValueError(
             "Claude hit the max_tokens limit before finishing the page. "
             "Shorten the brief, or raise max_tokens further."
