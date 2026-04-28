@@ -23,7 +23,6 @@ class LandingBrief:
     brand_colors_hex: dict[str, str]
     font_family: str
     style_keywords: str
-    hero_image_path: str = "hero.jpg"
 
 
 @dataclass(frozen=True)
@@ -51,14 +50,16 @@ def _system_prompt() -> str:
         "minimal vanilla JS only if needed (e.g., FAQ accordion, smooth scroll).\n"
         "3. Embeds the operator's form HTML EXACTLY as provided — never change "
         "field names, action, method, hidden inputs, or button text.\n"
-        "4. Uses <img src=\"hero.jpg\" alt=\"...\"> for the hero image with a "
-        "meaningful alt text and responsive sizing.\n"
+        "4. Uses NO external images, NO photos, NO <img> tags. The hero "
+        "section relies on typography, gradients, color blocks, simple inline "
+        "SVG decorations, or CSS patterns — design must work without any image "
+        "asset. This is intentional: keeps the page fast and asset-free.\n"
         "5. Configures Tailwind with an inline `tailwind.config` mapping the "
         "provided primary/secondary/accent colors to `brand-primary`, etc.\n"
         "6. Loads the chosen Google Font and applies it as the body font.\n"
         "7. Is mobile-first: every section reads cleanly at 360px width.\n"
         "8. Includes a complete <head>: charset, viewport, title, description, "
-        "og:title, og:description, og:image (use hero.jpg), twitter:card.\n"
+        "og:title, og:description, twitter:card. Skip og:image (no image asset).\n"
         "9. Writes copy in Italian unless the brief explicitly says otherwise.\n"
         "10. NEVER uses placeholder/Lorem Ipsum copy. Every word must be "
         "intentional and aligned with the brief.\n"
@@ -109,8 +110,10 @@ def _user_prompt(brief: LandingBrief) -> str:
 - Brand colors (HEX):
 {color_lines}
 
-## Hero image
-Path relativo: hero.jpg (già salvato accanto a index.html). Aspect 16:9, da usare nel hero.
+## Asset
+Nessuna immagine disponibile. Costruisci l'hero e tutte le sezioni con sole
+risorse tipografiche, gradienti, blocchi di colore e — se utile — piccoli SVG
+inline puramente decorativi.
 
 ---
 

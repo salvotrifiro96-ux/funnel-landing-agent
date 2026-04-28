@@ -2,11 +2,10 @@
 
 Flow:
   0. Brief (sidebar)            → client, slug, branding
-  1. Content                    → headline, value props, sections, form HTML
-  2. Hero image                 → prompt → Higgsfield Nano Banana Pro
-  3. Generate                   → Claude HTML/Tailwind
-  4. Preview                    → iframe
-  5. Publish                    → push to GitHub → live on landing.<domain>/pages/<slug>/
+  1. Content                    → project context + form HTML
+  2. Generate                   → Claude HTML/Tailwind (no images)
+  3. Preview                    → iframe
+  4. Publish                    → push to GitHub → live on landing.<domain>/pages/<slug>/
 """
 from __future__ import annotations
 
@@ -17,7 +16,6 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from agent.github_publish import GitHubConfig, publish_landing
-from agent.image_gen import ImageGenError, generate_hero_image
 from agent.landing_gen import LandingBrief, LandingPage, generate_landing
 from agent.usage_log import ensure_schema as _ensure_usage_schema, log_event as _log_event
 
@@ -35,7 +33,6 @@ def _secret(key: str, default: str = "") -> str:
 
 
 ANTHROPIC_API_KEY = _secret("ANTHROPIC_API_KEY")
-OPENAI_API_KEY = _secret("OPENAI_API_KEY")
 APP_PASSWORD = _secret("APP_PASSWORD")
 
 st.set_page_config(page_title="Funnel Landing Agent", layout="wide", page_icon="🛬")
@@ -69,8 +66,6 @@ _password_gate()
 DEFAULT_STATE: dict[str, object] = {
     "step": "brief",
     "brief": None,
-    "hero_prompt": "",
-    "hero_image_bytes": None,
     "landing": None,
     "publish_result": None,
     "error": None,
@@ -212,68 +207,8 @@ def _step_content() -> None:
             "project_context": project_context.strip(),
             "form_html": form_html.strip(),
         }
-        _set_step("hero")
+        _set_step("generate")
         st.rerun()
-
-
-def _step_hero() -> None:
-    st.title("Step 2 · Immagine hero")
-    partial = st.session_state.get("brief_partial", {})
-    st.caption(f"Cliente: **{partial.get('client_name','?')}** · Slug: `{partial.get('slug','?')}`")
-
-    project_summary = (partial.get("project_context") or "")[:400]
-    default_prompt = (
-        f"editorial hero image for a landing page. Project context: {project_summary}. "
-        f"Style: {partial.get('style_keywords','')}, photographic, soft natural light, "
-        "no text, 16:9, professional, optimistic mood, single focal subject, "
-        "shallow depth of field."
-    )
-    st.session_state.hero_prompt = st.text_area(
-        "Prompt immagine (gpt-image-1 · 1536x1024)",
-        value=st.session_state.hero_prompt or default_prompt,
-        height=120,
-        help="L'immagine viene generata in 16:9. Niente testo nell'immagine.",
-    )
-    quality = st.selectbox(
-        "Qualità immagine",
-        ["high", "medium", "low"],
-        index=0,
-        help="**high** ≈ €0.25 (consigliato per landing pubbliche) · **medium** ≈ €0.07 · **low** ≈ €0.02",
-    )
-
-    cols = st.columns([1, 1, 4])
-    if cols[0].button("⬅️ Contenuti"):
-        _set_step("content")
-        st.rerun()
-    if cols[1].button("🎨 Genera hero", type="primary"):
-        with st.spinner(f"gpt-image-1 sta generando l'hero ({quality})…"):
-            try:
-                img_bytes = generate_hero_image(
-                    st.session_state.hero_prompt,
-                    api_key=OPENAI_API_KEY,
-                    aspect="16:9",
-                    quality=quality,
-                )
-                st.session_state.hero_image_bytes = img_bytes
-                _log_event(
-                    "hero_generated",
-                    payload={
-                        "slug": partial.get("slug"),
-                        "client_name": partial.get("client_name"),
-                        "quality": quality,
-                        "image_kb": len(img_bytes) // 1024,
-                    },
-                )
-            except ImageGenError as e:
-                st.session_state.error = f"Image generation error: {e}"
-            except Exception as e:
-                st.session_state.error = f"Unexpected error: {e}\n\n{traceback.format_exc()}"
-
-    if st.session_state.hero_image_bytes:
-        st.image(st.session_state.hero_image_bytes, caption="Hero generata", use_container_width=True)
-        if st.button("➡️ Avanti: genera HTML", type="primary"):
-            _set_step("generate")
-            st.rerun()
 
 
 def _build_brief() -> LandingBrief:
@@ -290,14 +225,7 @@ def _build_brief() -> LandingBrief:
 
 
 def _step_generate() -> None:
-    st.title("Step 3 · Genera HTML")
-    if not st.session_state.hero_image_bytes:
-        st.error("Genera prima l'immagine hero.")
-        if st.button("⬅️ Hero"):
-            _set_step("hero")
-            st.rerun()
-        return
-
+    st.title("Step 2 · Genera HTML")
     brief = _build_brief()
     st.caption(f"Cliente: **{brief.client_name}** · Slug: `{brief.slug}` · Stile: {brief.style_keywords}")
 
@@ -327,8 +255,8 @@ def _step_generate() -> None:
     st.markdown(f"**Meta description**: {landing.meta_description}")
 
     cols = st.columns([1, 1, 3])
-    if cols[0].button("⬅️ Hero"):
-        _set_step("hero")
+    if cols[0].button("⬅️ Contenuti"):
+        _set_step("content")
         st.rerun()
     if cols[1].button("🔁 Re-generate"):
         st.session_state.landing = None
@@ -339,7 +267,7 @@ def _step_generate() -> None:
 
 
 def _step_preview() -> None:
-    st.title("Step 4 · Anteprima")
+    st.title("Step 3 · Anteprima")
     landing: LandingPage = st.session_state.landing
     if not landing:
         _set_step("generate")
@@ -366,7 +294,6 @@ def _step_preview() -> None:
 def _publish() -> None:
     brief = _build_brief()
     landing: LandingPage = st.session_state.landing
-    image_bytes: bytes = st.session_state.hero_image_bytes
 
     cfg = GitHubConfig(
         token=_secret("GITHUB_TOKEN"),
@@ -381,7 +308,6 @@ def _publish() -> None:
                 cfg,
                 slug=brief.slug,
                 html=landing.html,
-                image_bytes=image_bytes,
             )
             st.session_state.publish_result = result
             _log_event(
@@ -408,7 +334,7 @@ def _step_done() -> None:
         "landing. Se ricevi 404 al primo tentativo, ricarica dopo un minuto."
     )
     st.code(result.public_url, language=None)
-    st.caption(f"Commit HTML: `{result.html_commit_sha[:8]}` · Hero: `{result.image_commit_sha[:8]}`")
+    st.caption(f"Commit HTML: `{result.html_commit_sha[:8]}`")
 
     if st.button("🔄 Nuova landing"):
         for k, v in DEFAULT_STATE.items():
@@ -421,12 +347,14 @@ _sidebar()
 _show_error_if_any()
 
 step = st.session_state.step
+if step == "hero":  # legacy state from older sessions
+    step = "generate"
+    st.session_state.step = step
+
 if step == "brief":
     _step_brief()
 elif step == "content":
     _step_content()
-elif step == "hero":
-    _step_hero()
 elif step == "generate":
     _step_generate()
 elif step == "preview":

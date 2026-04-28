@@ -53,7 +53,6 @@ class PublishResult:
     slug: str
     public_url: str
     html_commit_sha: str
-    image_commit_sha: str
 
 
 def _headers(cfg: GitHubConfig) -> dict[str, str]:
@@ -105,7 +104,6 @@ def publish_landing(
     *,
     slug: str,
     html: str,
-    image_bytes: bytes,
 ) -> PublishResult:
     cfg.ensure_complete()
     safe_slug = slug.strip().strip("/").lower()
@@ -113,12 +111,6 @@ def publish_landing(
         raise ValueError("slug cannot be empty")
 
     base_path = f"pages/{safe_slug}"
-    image_sha = _put_file(
-        cfg,
-        path=f"{base_path}/hero.jpg",
-        content_bytes=image_bytes,
-        message=f"feat({safe_slug}): add hero image",
-    )
     html_sha = _put_file(
         cfg,
         path=f"{base_path}/index.html",
@@ -129,7 +121,6 @@ def publish_landing(
         slug=safe_slug,
         public_url=f"{cfg.base_url}/{base_path}/",
         html_commit_sha=html_sha,
-        image_commit_sha=image_sha,
     )
 
 
