@@ -15,6 +15,15 @@ CLAUDE_MODEL = "claude-opus-4-7"
 
 
 @dataclass(frozen=True)
+class BodyImageSpec:
+    """One uploaded image for the page body + a hint of where to place it."""
+
+    filename: str          # final asset filename (e.g. "body-speaker.jpg")
+    position_hint: str     # operator's note (e.g. "subito dopo la promise, centrata")
+    alt: str               # alt text
+
+
+@dataclass(frozen=True)
 class LandingBrief:
     client_name: str
     slug: str
@@ -23,6 +32,20 @@ class LandingBrief:
     brand_colors_hex: dict[str, str]
     font_family: str
     style_keywords: str
+    # Optional reference / custom-code blobs.
+    references: str = ""
+    custom_code_head: str = ""
+    custom_code_body: str = ""
+    # Logo: filename relative to the published page folder.
+    logo_filename: str = ""
+    # Video: filename + position hint (one of: "hero", "after_promise",
+    # "before_cta", "after_cta", "section_X" or empty for none).
+    video_filename: str = ""
+    video_position: str = ""
+    # Body images: ordered tuple of specs. The HTML references each by filename.
+    body_images: tuple[BodyImageSpec, ...] = ()
+    # Trustbar: filenames of small logos to render in a horizontal strip.
+    trustbar_logo_filenames: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -108,8 +131,121 @@ def _system_prompt() -> str:
     )
 
 
+def _format_asset_section(brief: LandingBrief) -> str:
+    """Describe what concrete assets the page must reference + how to use them."""
+    has_logo = bool(brief.logo_filename)
+    has_video = bool(brief.video_filename) and bool(brief.video_position)
+    has_body_images = bool(brief.body_images)
+    has_trustbar = bool(brief.trustbar_logo_filenames)
+
+    if not (has_logo or has_video or has_body_images or has_trustbar):
+        return (
+            "## Asset\n"
+            "Nessun asset caricato. Costruisci l'hero e tutte le sezioni con sole "
+            "risorse tipografiche, gradienti, blocchi di colore e — se utile — piccoli SVG "
+            "inline puramente decorativi. NON aggiungere `<img data-img-slot=...>` se "
+            "non strettamente necessario alla conversione (verranno comunque rimossi "
+            "in fase di publish se senza upload)."
+        )
+
+    parts = ["## Asset reali caricati dall'operatore"]
+    parts.append(
+        "I file qui sotto verranno COMMITTATI nel repo accanto a `index.html`. "
+        "DEVI riferirli con `src` relativo al filename indicato — niente percorsi assoluti, "
+        "niente CDN, niente placeholder. Se NON li referenzi, l'asset viene caricato ma "
+        "non usato."
+    )
+    if has_logo:
+        parts.append(
+            f"\n### Logo brand\n"
+            f"- File: `{brief.logo_filename}`\n"
+            "- DOVE: inseriscilo come <img> nell'header in alto a sinistra (h-8 sm:h-10), "
+            "linkato all'home (#top). Se il design lo richiede, ripetilo nel footer "
+            "(h-6, opacita-70). Tag: "
+            f'`<img src="{brief.logo_filename}" alt="{brief.client_name}" class="...">`.\n'
+            "- NON includere mai placeholder/Lorem-style logo se questo asset esiste."
+        )
+    if has_trustbar:
+        names_csv = ", ".join(f"`{n}`" for n in brief.trustbar_logo_filenames)
+        parts.append(
+            f"\n### Trustbar (loghi 'as seen on')\n"
+            f"- Files: {names_csv}\n"
+            "- DOVE: aggiungi una sezione `<section id=\"trustbar\">` SUBITO sotto l'hero "
+            "(o sotto la prima CTA), con grid orizzontale di <img> tutti in grayscale "
+            "(`filter:grayscale(1) opacity-60`), altezza uniforme h-6 sm:h-8, "
+            "spaced-around, prefisso testuale tipo \"Come visto su\" o \"Ne parlano:\" se "
+            "appropriato al contesto. Ogni img: "
+            "`<img src=\"<filename>\" alt=\"...\" class=\"h-6 sm:h-8 ...\">`."
+        )
+    if has_body_images:
+        body_lines = ["\n### Body images"]
+        for spec in brief.body_images:
+            body_lines.append(
+                f"- `{spec.filename}` — alt: \"{spec.alt}\" — DOVE: {spec.position_hint}"
+            )
+        body_lines.append(
+            "Usa OGNI body image dove indicato. Tag: "
+            '`<img src="<filename>" alt="<alt>" class="...">`. Niente '
+            "`data-img-slot` su queste — sono asset gia` definitivi."
+        )
+        parts.append("\n".join(body_lines))
+    if has_video:
+        parts.append(
+            f"\n### Video\n"
+            f"- File: `{brief.video_filename}`\n"
+            f"- DOVE: posizione \"{brief.video_position}\" "
+            "(`hero` = al posto/sopra/sotto l'hero principale; `after_promise` = dopo "
+            "la promise / sub-headline; `before_cta` = subito prima della CTA principale; "
+            "`after_cta` = subito dopo la prima CTA; `section_X` = in una sua sezione "
+            "dedicata).\n"
+            "- TAG da usare: "
+            f'`<video src="{brief.video_filename}" controls playsinline preload="metadata" '
+            'class="w-full max-w-3xl mx-auto rounded-xl shadow-lg"></video>`.\n'
+            "- NON usare iframe / YouTube embed: l'mp4 e` self-hosted."
+        )
+    return "\n".join(parts)
+
+
+def _format_custom_code(brief: LandingBrief) -> str:
+    head_blob = (brief.custom_code_head or "").strip()
+    body_blob = (brief.custom_code_body or "").strip()
+    if not head_blob and not body_blob:
+        return ""
+    parts = ["## Codice custom da embeddare VERBATIM (no modifiche, no commenti)"]
+    if head_blob:
+        parts.append(
+            "### Da inserire DENTRO `<head>` (es. tracking pixel, schema.org, font extra)\n"
+            "```\n"
+            f"{head_blob}\n"
+            "```"
+        )
+    if body_blob:
+        parts.append(
+            "### Da inserire IN FONDO al `<body>` prima di `</body>` "
+            "(es. chat widget, script di terze parti)\n"
+            "```\n"
+            f"{body_blob}\n"
+            "```"
+        )
+    parts.append(
+        "Non riformattare, non commentare, non rinominare variabili. Va embeddato "
+        "esattamente cosi come appare."
+    )
+    return "\n".join(parts)
+
+
 def _user_prompt(brief: LandingBrief) -> str:
     color_lines = "\n".join(f"  - {k}: {v}" for k, v in brief.brand_colors_hex.items())
+    references_block = (
+        f"\n## Reference (landing/esempi che l'operatore vuole come ispirazione strutturale)\n"
+        f"{brief.references.strip()}\n"
+        "Studia ritmo, gerarchia, lunghezze. NON copiare testo/headline letterali.\n"
+        if (brief.references or "").strip()
+        else ""
+    )
+    custom_code_block = _format_custom_code(brief)
+    asset_block = _format_asset_section(brief)
+
     return f"""# Brief
 
 ## Cliente
@@ -131,11 +267,10 @@ def _user_prompt(brief: LandingBrief) -> str:
 - Font family (Google Fonts): {brief.font_family}
 - Brand colors (HEX):
 {color_lines}
+{references_block}
+{asset_block}
 
-## Asset
-Nessuna immagine disponibile. Costruisci l'hero e tutte le sezioni con sole
-risorse tipografiche, gradienti, blocchi di colore e — se utile — piccoli SVG
-inline puramente decorativi.
+{custom_code_block}
 
 ---
 
@@ -143,7 +278,7 @@ Sei tu il copywriter. Decidi struttura, headline, subheadline, sezioni, bullet,
 testimonial style/placement (solo se il brief offre proof reale — altrimenti
 salta), CTA, FAQ. Scrivi italiano persuasivo, concreto, anti-fuffa.
 
-Restituisci SOLO il JSON come da istruzioni di sistema.
+Restituisci SOLO l'output delimitato come da istruzioni di sistema.
 """
 
 

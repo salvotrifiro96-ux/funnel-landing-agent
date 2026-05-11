@@ -105,11 +105,17 @@ def publish_landing(
     slug: str,
     html: str,
     images: dict[str, bytes] | None = None,
+    extra_assets: dict[str, bytes] | None = None,
 ) -> PublishResult:
-    """Publish HTML + optional per-slot images to the target repo.
+    """Publish HTML + optional per-slot images + arbitrary extra assets.
 
-    `images` maps slot name → image bytes. Each is committed at
-    pages/<slug>/img-<slot>.jpg.
+    Args:
+        images:        legacy slot-based images. Each entry → `pages/<slug>/img-<slot>.jpg`.
+        extra_assets:  generic assets keyed by FINAL filename (no `img-` prefix),
+                       e.g. `{"logo.png": b"...", "video.mp4": b"...",
+                       "body-speaker.jpg": b"...", "trust-logo-1.png": b"..."}`.
+                       Each is committed at `pages/<slug>/<filename>` verbatim.
+                       Filenames must be safe (no slashes, no parent traversal).
     """
     cfg.ensure_complete()
     safe_slug = slug.strip().strip("/").lower()
@@ -127,6 +133,19 @@ def publish_landing(
             path=f"{base_path}/img-{slot_safe}.jpg",
             content_bytes=payload,
             message=f"feat({safe_slug}): add image for slot {slot_safe}",
+        )
+
+    for asset_name, payload in (extra_assets or {}).items():
+        if not payload:
+            continue
+        clean_name = asset_name.strip().lstrip("/").replace("..", "").replace("\\", "/")
+        if not clean_name or "/" in clean_name:
+            raise ValueError(f"unsafe asset filename: {asset_name!r}")
+        _put_file(
+            cfg,
+            path=f"{base_path}/{clean_name}",
+            content_bytes=payload,
+            message=f"feat({safe_slug}): add asset {clean_name}",
         )
 
     html_sha = _put_file(

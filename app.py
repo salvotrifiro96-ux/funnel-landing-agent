@@ -27,6 +27,7 @@ from agent.image_gen import (
     generate_image,
 )
 from agent.landing_gen import (
+    BodyImageSpec,
     LandingBrief,
     LandingPage,
     generate_landing,
@@ -295,6 +296,10 @@ def _step_content() -> None:
         "CTA basandosi su questo testo."
     )
 
+    existing_assets = (st.session_state.get("brief_partial") or {}).get(
+        "uploaded_assets", {}
+    )
+
     with st.form("content_form"):
         project_context = st.text_area(
             "Contesto del progetto (libero, scrivi tutto quello che ti viene in mente)",
@@ -332,16 +337,227 @@ def _step_content() -> None:
             placeholder='<form action="https://hooks.example.com/lead" method="POST">...</form>',
         )
 
+        # ── Optional inputs grouped in expanders ──────────────────────
+        with st.expander("📚 Reference & istruzioni extra (opzionale)", expanded=False):
+            references = st.text_area(
+                "Reference landing/esempi — link o descrizioni che Claude deve studiare",
+                value=(existing_assets.get("references") or ""),
+                height=120,
+                placeholder=(
+                    "Es:\n"
+                    "• https://stripe.com/atlas — gerarchia tipografica, sezioni narrative\n"
+                    "• Apple WWDC keynote landing: hero gigante + 3 bullet ultra puliti\n"
+                    "• Pattern: trustbar subito sotto hero, poi 3 colonne valore prima della CTA"
+                ),
+                help="Solo descrizioni testuali / link. Claude studia ritmo e struttura, non copia testo.",
+            )
+
+        with st.expander("🧩 Codice custom da embeddare verbatim (opzionale)", expanded=False):
+            st.caption(
+                "Snippet HTML/JS che vanno inseriti integri nella landing. "
+                "Usali per pixel di tracking, script di terze parti, schema.org, font."
+            )
+            custom_code_head = st.text_area(
+                "Codice da inserire dentro <head>",
+                value=(existing_assets.get("custom_code_head") or ""),
+                height=140,
+                placeholder=(
+                    "<!-- Meta Pixel -->\n"
+                    "<script>!function(f,b,e,v,n,t,s)...</script>\n"
+                    "<!-- Schema.org -->\n"
+                    '<script type="application/ld+json">{...}</script>'
+                ),
+            )
+            custom_code_body = st.text_area(
+                "Codice da inserire prima di </body>",
+                value=(existing_assets.get("custom_code_body") or ""),
+                height=140,
+                placeholder=(
+                    "<!-- Chat widget -->\n"
+                    '<script src="https://cdn.example.com/chat.js" async></script>'
+                ),
+            )
+
+        with st.expander("🖼 Asset visivi (logo, immagini body, trustbar, video)", expanded=False):
+            st.caption(
+                "Tutti i file vengono committati nel repo del landing accanto a `index.html` "
+                "e referenziati direttamente. Niente CDN, niente upload esterni."
+            )
+
+            st.markdown("**Logo brand** — appare in alto a sinistra dell'header")
+            logo_file = st.file_uploader(
+                "Logo (PNG / SVG / JPG)",
+                type=["png", "svg", "jpg", "jpeg", "webp"],
+                key="landing_logo_uploader",
+            )
+            if existing_assets.get("logo_filename"):
+                st.caption(f"Logo gia` caricato: `{existing_assets['logo_filename']}` "
+                           "(ri-uploada per sostituirlo)")
+
+            st.divider()
+            st.markdown("**Trustbar** — loghi piccoli 'come visto su' in una fila grayscale")
+            trustbar_files = st.file_uploader(
+                "Loghi trustbar (multipli, PNG/SVG/JPG)",
+                type=["png", "svg", "jpg", "jpeg", "webp"],
+                accept_multiple_files=True,
+                key="landing_trustbar_uploader",
+            )
+            if existing_assets.get("trustbar_filenames"):
+                st.caption(
+                    "Trustbar gia` caricata: "
+                    + ", ".join(f"`{n}`" for n in existing_assets["trustbar_filenames"])
+                )
+
+            st.divider()
+            st.markdown(
+                "**Immagini body** — fino a 6 immagini con indicazione di dove posizionarle"
+            )
+            body_image_files = st.file_uploader(
+                "Body images (PNG/JPG, multipli)",
+                type=["png", "jpg", "jpeg", "webp"],
+                accept_multiple_files=True,
+                key="landing_body_images_uploader",
+            )
+            # Allow per-image position + alt for both newly uploaded files
+            # AND for previously uploaded ones (so the user can tweak captions
+            # without re-uploading every time).
+            existing_body_specs = existing_assets.get("body_image_specs") or []
+            new_body_specs: list[dict] = []
+            files_to_caption = list(body_image_files or []) or [
+                {"name": s["filename"], "_existing": True} for s in existing_body_specs
+            ]
+            for idx, f in enumerate(files_to_caption):
+                fname = f.name if hasattr(f, "name") else f["name"]
+                default_alt = ""
+                default_pos = ""
+                for spec in existing_body_specs:
+                    if spec.get("filename") == fname:
+                        default_alt = spec.get("alt", "")
+                        default_pos = spec.get("position_hint", "")
+                        break
+                st.caption(f"📎 `{fname}`")
+                cols = st.columns([2, 3])
+                alt_val = cols[0].text_input(
+                    "Alt text",
+                    value=default_alt,
+                    key=f"body_img_alt_{idx}",
+                    placeholder="Es. Foto del relatore Salvo Trifiro",
+                )
+                pos_val = cols[1].text_input(
+                    "Dove posizionarla",
+                    value=default_pos,
+                    key=f"body_img_pos_{idx}",
+                    placeholder="Es. subito dopo la promise, centrata, larghezza piena",
+                )
+                new_body_specs.append({"filename": fname, "alt": alt_val, "position_hint": pos_val})
+
+            st.divider()
+            st.markdown("**Video** — mp4 + posizione")
+            video_file = st.file_uploader(
+                "Video (MP4)",
+                type=["mp4", "webm", "mov"],
+                key="landing_video_uploader",
+            )
+            if existing_assets.get("video_filename"):
+                st.caption(f"Video gia` caricato: `{existing_assets['video_filename']}` "
+                           "(ri-uploada per sostituirlo)")
+            video_position = st.selectbox(
+                "Dove va posizionato il video",
+                options=["", "hero", "after_promise", "before_cta", "after_cta", "section_dedicata"],
+                index=(
+                    ["", "hero", "after_promise", "before_cta", "after_cta", "section_dedicata"]
+                    .index(existing_assets.get("video_position", ""))
+                    if existing_assets.get("video_position", "") in
+                       ["", "hero", "after_promise", "before_cta", "after_cta", "section_dedicata"]
+                    else 0
+                ),
+                help=(
+                    "hero = al posto/sopra/sotto l'hero • after_promise = subito dopo la "
+                    "promise/subtitle • before_cta = appena prima della CTA primaria • "
+                    "after_cta = appena dopo • section_dedicata = in una sua sezione"
+                ),
+            )
+
         submitted = st.form_submit_button("➡️ Avanti: hero image", type="primary")
 
     if submitted:
         if not project_context.strip() or not form_html.strip():
             st.error("Contesto del progetto e form HTML sono entrambi obbligatori.")
             return
+
+        # ── Collect uploaded asset bytes ──────────────────────────────
+        # File uploaders return None on subsequent re-submits (because the
+        # widget instance was reset). Preserve previously-cached bytes when
+        # the user didn't re-upload.
+        cached = existing_assets or {}
+        asset_bytes = dict(cached.get("asset_bytes", {}))
+
+        if logo_file is not None:
+            ext = logo_file.name.rsplit(".", 1)[-1].lower() or "png"
+            logo_filename = f"logo.{ext}"
+            asset_bytes[logo_filename] = logo_file.getvalue()
+        else:
+            logo_filename = cached.get("logo_filename", "")
+
+        trustbar_filenames: list[str] = []
+        if trustbar_files:
+            for i, f in enumerate(trustbar_files):
+                ext = f.name.rsplit(".", 1)[-1].lower() or "png"
+                fname = f"trust-logo-{i + 1}.{ext}"
+                asset_bytes[fname] = f.getvalue()
+                trustbar_filenames.append(fname)
+        else:
+            trustbar_filenames = list(cached.get("trustbar_filenames", []))
+
+        # Body images: persist bytes + specs (alt + position from form widgets)
+        body_image_specs_serialized: list[dict] = []
+        if body_image_files:
+            for i, f in enumerate(body_image_files):
+                ext = f.name.rsplit(".", 1)[-1].lower() or "jpg"
+                fname = f"body-{i + 1}.{ext}"
+                asset_bytes[fname] = f.getvalue()
+                meta = new_body_specs[i] if i < len(new_body_specs) else {}
+                body_image_specs_serialized.append({
+                    "filename": fname,
+                    "alt": (meta.get("alt") or "").strip(),
+                    "position_hint": (meta.get("position_hint") or "").strip(),
+                })
+        else:
+            # Even without re-upload, update captions if the user edited them
+            for i, spec in enumerate(cached.get("body_image_specs", [])):
+                meta = new_body_specs[i] if i < len(new_body_specs) else spec
+                body_image_specs_serialized.append({
+                    "filename": spec["filename"],
+                    "alt": (meta.get("alt") or spec.get("alt", "")).strip(),
+                    "position_hint": (
+                        meta.get("position_hint") or spec.get("position_hint", "")
+                    ).strip(),
+                })
+
+        if video_file is not None:
+            ext = video_file.name.rsplit(".", 1)[-1].lower() or "mp4"
+            video_filename = f"video.{ext}"
+            asset_bytes[video_filename] = video_file.getvalue()
+        else:
+            video_filename = cached.get("video_filename", "")
+
+        uploaded_assets = {
+            "references": references.strip(),
+            "custom_code_head": custom_code_head.strip(),
+            "custom_code_body": custom_code_body.strip(),
+            "logo_filename": logo_filename,
+            "trustbar_filenames": trustbar_filenames,
+            "body_image_specs": body_image_specs_serialized,
+            "video_filename": video_filename,
+            "video_position": video_position,
+            "asset_bytes": asset_bytes,
+        }
+
         st.session_state.brief_partial = {
             **partial,
             "project_context": project_context.strip(),
             "form_html": form_html.strip(),
+            "uploaded_assets": uploaded_assets,
         }
         _set_step("generate")
         st.rerun()
@@ -349,6 +565,16 @@ def _step_content() -> None:
 
 def _build_brief() -> LandingBrief:
     p = st.session_state.brief_partial
+    assets = p.get("uploaded_assets", {}) or {}
+    body_specs_raw = assets.get("body_image_specs", []) or []
+    body_specs = tuple(
+        BodyImageSpec(
+            filename=spec["filename"],
+            position_hint=spec.get("position_hint", ""),
+            alt=spec.get("alt", ""),
+        )
+        for spec in body_specs_raw
+    )
     return LandingBrief(
         client_name=p["client_name"],
         slug=p["slug"],
@@ -357,6 +583,14 @@ def _build_brief() -> LandingBrief:
         brand_colors_hex=p["brand_colors_hex"],
         font_family=p["font_family"],
         style_keywords=p["style_keywords"],
+        references=assets.get("references", ""),
+        custom_code_head=assets.get("custom_code_head", ""),
+        custom_code_body=assets.get("custom_code_body", ""),
+        logo_filename=assets.get("logo_filename", ""),
+        video_filename=assets.get("video_filename", ""),
+        video_position=assets.get("video_position", ""),
+        body_images=body_specs,
+        trustbar_logo_filenames=tuple(assets.get("trustbar_filenames", [])),
     )
 
 
@@ -732,6 +966,9 @@ def _publish() -> None:
     images: dict[str, bytes] = {
         name: payload for name, payload in (st.session_state.slot_images or {}).items() if payload
     }
+    # Extra assets uploaded by the operator (logo, video, body images, trustbar logos)
+    assets_meta = (st.session_state.get("brief_partial") or {}).get("uploaded_assets", {})
+    extra_assets: dict[str, bytes] = dict(assets_meta.get("asset_bytes", {}) or {})
 
     with st.spinner("Pubblicazione su GitHub Pages in corso…"):
         try:
@@ -740,6 +977,7 @@ def _publish() -> None:
                 slug=brief.slug,
                 html=html_compiled,
                 images=images,
+                extra_assets=extra_assets,
             )
             st.session_state.publish_result = result
             _log_event(
