@@ -34,6 +34,7 @@ from agent.landing_gen import (
     revise_landing,
     strip_skipped_image_slots,
 )
+from agent.orch_link import linked_project_id, save_to_project_button, sidebar_project_picker
 from agent.usage_log import ensure_schema as _ensure_usage_schema, log_event as _log_event
 
 load_dotenv()
@@ -223,6 +224,7 @@ def _hosting_sidebar() -> None:
 
 def _sidebar() -> None:
     _hosting_sidebar()
+    sidebar_project_picker()
     st.sidebar.divider()
     st.sidebar.title("🛬 Brief")
     with st.sidebar.form("brief_form"):
@@ -624,6 +626,22 @@ def _step_generate() -> None:
     st.markdown(f"**Page title**: {landing.page_title}")
     st.markdown(f"**Meta description**: {landing.meta_description}")
 
+    # Cross-app: salva landing nel progetto orchestrator
+    if linked_project_id():
+        brief_p = st.session_state.get("brief_partial") or {}
+        save_to_project_button(
+            agent_slug="landing",
+            output={
+                "html": landing.html,
+                "page_title": landing.page_title,
+                "meta_description": landing.meta_description,
+                "slug": brief_p.get("slug", ""),
+            },
+            user_input={**brief_p},
+            label="🎯 Approva landing per progetto",
+            key_suffix="landing_html",
+        )
+
     cols = st.columns([1, 1, 3])
     if cols[0].button("⬅️ Contenuti"):
         _set_step("content")
@@ -999,6 +1017,25 @@ def _step_done() -> None:
     st.title("✅ Landing pubblicata")
     result = st.session_state.publish_result
     st.success(f"Live a breve su: {result.public_url}")
+
+    # Cross-app: salva URL pubblica nel progetto orchestrator
+    if linked_project_id():
+        brief_p = st.session_state.get("brief_partial") or {}
+        landing_obj = st.session_state.get("landing")
+        save_to_project_button(
+            agent_slug="landing",
+            output={
+                "public_url": result.public_url,
+                "html_commit_sha": result.html_commit_sha,
+                "slug": brief_p.get("slug", ""),
+                "html": getattr(landing_obj, "html", ""),
+                "page_title": getattr(landing_obj, "page_title", ""),
+                "meta_description": getattr(landing_obj, "meta_description", ""),
+            },
+            user_input={**brief_p},
+            label="🎯 Approva landing PUBBLICATA per progetto",
+            key_suffix="landing_published",
+        )
     st.info(
         "GitHub Pages può impiegare 30-90 secondi prima di servire la nuova "
         "landing. Se ricevi 404 al primo tentativo, ricarica dopo un minuto."
