@@ -93,6 +93,7 @@ class LandingStore:
         slot_choices: dict[str, str],
         slot_prompts: dict[str, str],
         publish_result: dict[str, Any] | None,
+        image_placements: list[dict[str, Any]] | None = None,
     ) -> LandingRow:
         title = f"{client_name or '?'} · {slug or '?'}"[:200]
         body = {
@@ -106,6 +107,7 @@ class LandingStore:
                 "brief": brief_dict,
                 "slot_choices": slot_choices,
                 "slot_prompts": slot_prompts,
+                "image_placements": image_placements or [],
                 "publish_result": publish_result or {},
             },
             "preview": (page_title or meta_description or "")[:500],

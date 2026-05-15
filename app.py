@@ -35,6 +35,14 @@ from agent.landing_gen import (
     strip_skipped_image_slots,
 )
 from agent.orch_link import linked_project_id, save_to_project_button, sidebar_project_picker
+from agent.section_layout import (
+    ALL_PLACEMENTS,
+    ImagePlacement,
+    Placement,
+    apply_image_placements,
+    derive_slot_name,
+    extract_sections,
+)
 from agent.store import LandingRow, LandingStore
 from agent.usage_log import ensure_schema as _ensure_usage_schema, log_event as _log_event
 
@@ -90,6 +98,9 @@ DEFAULT_STATE: dict[str, object] = {
     "slot_choices": {},   # {slot_name: 'skip' | 'upload' | 'generate'}
     "slot_images": {},    # {slot_name: bytes}
     "slot_prompts": {},   # {slot_name: prompt str}
+    # Pianificazione per-sezione decisa dall'operatore (vedi section_layout).
+    # Lista di dict serializzabili: {section_index, placement, slot_name, alt_text}
+    "image_placements": [],
     "publish_result": None,
     "error": None,
     "hosting_mode": "quick",     # 'quick' or 'custom'
@@ -152,6 +163,7 @@ def _archive_save_current() -> None:
             brief_dict=bp,
             slot_choices=dict(st.session_state.get("slot_choices") or {}),
             slot_prompts=dict(st.session_state.get("slot_prompts") or {}),
+            image_placements=list(st.session_state.get("image_placements") or []),
             publish_result=publish_dict,
         )
         st.session_state.loaded_landing_id = saved.id
@@ -226,6 +238,7 @@ def _apply_archive_action() -> None:
             st.session_state.brief_partial = payload.get("brief", {}) or {}
             st.session_state.slot_choices = payload.get("slot_choices", {}) or {}
             st.session_state.slot_prompts = payload.get("slot_prompts", {}) or {}
+            st.session_state.image_placements = payload.get("image_placements") or []
             st.session_state.slot_images = {}
             st.session_state.publish_result = None
             st.session_state.loaded_landing_id = row.id
@@ -787,18 +800,150 @@ def _step_generate() -> None:
         st.session_state.slot_choices = {}
         st.session_state.slot_images = {}
         st.session_state.slot_prompts = {}
+        st.session_state.image_placements = []
         st.rerun()
-    next_label = "👁 Avanti" if not landing.image_slots else "🖼 Aggiungi immagini"
-    next_target = "preview" if not landing.image_slots else "images"
+    if cols[2].button("🗺 Pianifica immagini per sezione", type="primary"):
+        _set_step("section_plan")
+        st.rerun()
+
+
+_PLACEMENT_LABELS: dict[str, str] = {
+    "none": "🚫 Niente immagine",
+    "banner_top": "📐 Banner sopra la sezione",
+    "banner_bottom": "📐 Banner sotto la sezione",
+    "background": "🖼 Sfondo della sezione (con overlay testo)",
+    "inline_left": "🧩 Inline a sinistra del testo",
+    "inline_right": "🧩 Inline a destra del testo",
+    "inline_above": "🧩 Inline sopra il testo (centrata)",
+    "inline_below": "🧩 Inline sotto il testo (centrata)",
+}
+
+
+def _placements_to_state(plans: list[ImagePlacement]) -> list[dict]:
+    return [
+        {
+            "section_index": p.section_index,
+            "placement": p.placement,
+            "slot_name": p.slot_name,
+            "alt_text": p.alt_text,
+        }
+        for p in plans
+    ]
+
+
+def _state_to_placements(raw: list[dict]) -> tuple[ImagePlacement, ...]:
+    out: list[ImagePlacement] = []
+    for d in raw or []:
+        try:
+            out.append(
+                ImagePlacement(
+                    section_index=int(d["section_index"]),
+                    placement=d["placement"],
+                    slot_name=d["slot_name"],
+                    alt_text=d.get("alt_text", "") or "",
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return tuple(out)
+
+
+def _step_section_plan() -> None:
+    st.title("Step 3 · Pianifica immagini per sezione")
+    landing: LandingPage = st.session_state.landing
+    if not landing:
+        _set_step("generate")
+        st.rerun()
+        return
+
+    sections = extract_sections(landing.html)
+    if not sections:
+        st.info(
+            "Non ho trovato tag `<section>` di primo livello. "
+            "Passo direttamente all'anteprima."
+        )
+        if st.button("👁 Vai all'anteprima"):
+            _set_step("preview")
+            st.rerun()
+        return
+
+    st.caption(
+        "Per ogni sezione scegli SE e DOVE inserire un'immagine. Le scelte "
+        "verranno applicate in fase di anteprima e pubblicazione. Niente "
+        "immagine = niente `<img>`."
+    )
+
+    # Stato pre-esistente
+    prev_plans: dict[int, dict] = {
+        d["section_index"]: d for d in (st.session_state.image_placements or [])
+    }
+
+    new_plans: list[ImagePlacement] = []
+    for sec in sections:
+        with st.container(border=True):
+            st.markdown(f"### Sezione {sec.index}: {sec.title}")
+            if sec.section_id:
+                st.caption(f"`id={sec.section_id}`")
+            prev = prev_plans.get(sec.index, {})
+            current = prev.get("placement", "none")
+            current_idx = (
+                ALL_PLACEMENTS.index(current) if current in ALL_PLACEMENTS else 0
+            )
+            placement = st.selectbox(
+                "Dove vuoi l'immagine?",
+                options=list(ALL_PLACEMENTS),
+                index=current_idx,
+                key=f"placement_{sec.index}",
+                format_func=lambda p: _PLACEMENT_LABELS[p],
+            )
+            alt_text = ""
+            if placement != "none":
+                alt_text = st.text_input(
+                    "Alt text (testo descrittivo per accessibilità/SEO)",
+                    value=prev.get("alt_text", ""),
+                    key=f"alt_{sec.index}",
+                    placeholder="Es. Foto del relatore durante l'evento",
+                )
+                slot = prev.get("slot_name") or derive_slot_name(sec.index, placement)
+                # Se l'utente ha cambiato placement, rigenero il nome slot
+                if not slot.endswith(placement):
+                    slot = derive_slot_name(sec.index, placement)
+                new_plans.append(
+                    ImagePlacement(
+                        section_index=sec.index,
+                        placement=placement,  # type: ignore[arg-type]
+                        slot_name=slot,
+                        alt_text=alt_text,
+                    )
+                )
+
+    # Salva i piani in session_state ogni volta che si arriva qui
+    st.session_state.image_placements = _placements_to_state(new_plans)
+
+    # Pulizia: rimuovi slot_images orfani (slot_name che non sono più nel piano)
+    active_slots = {p.slot_name for p in new_plans}
+    st.session_state.slot_images = {
+        k: v for k, v in (st.session_state.slot_images or {}).items()
+        if k in active_slots
+    }
+
+    st.divider()
+    cols = st.columns([1, 1, 2])
+    if cols[0].button("⬅️ Genera"):
+        _set_step("generate")
+        st.rerun()
+    next_label = "🖼 Avanti: carica/genera immagini" if new_plans else "👁 Avanti: anteprima"
+    next_target = "images" if new_plans else "preview"
     if cols[2].button(next_label, type="primary"):
         _set_step(next_target)
         st.rerun()
 
 
 def _step_images() -> None:
-    st.title("Step 3 · Immagini (opzionali)")
+    st.title("Step 4 · Carica o genera le immagini")
     landing: LandingPage = st.session_state.landing
-    if not landing or not landing.image_slots:
+    plans = _state_to_placements(st.session_state.image_placements)
+    if not landing or not plans:
         _set_step("preview")
         st.rerun()
         return
@@ -813,65 +958,81 @@ def _step_images() -> None:
     images: dict[str, bytes] = dict(st.session_state.slot_images)
     prompts: dict[str, str] = dict(st.session_state.slot_prompts)
 
-    _ROLE_BADGE = {
-        "banner": "📐 Banner full-width",
-        "background": "🖼 Sfondo sezione",
-        "inline": "🧩 Inline",
+    sections = extract_sections(landing.html)
+    by_index = {s.index: s for s in sections}
+
+    # Mappa placement -> ruolo logico per aspect/badge
+    PLACEMENT_TO_ROLE: dict[str, str] = {
+        "banner_top": "banner",
+        "banner_bottom": "banner",
+        "background": "background",
+        "inline_left": "inline",
+        "inline_right": "inline",
+        "inline_above": "inline",
+        "inline_below": "inline",
     }
 
-    for slot in landing.image_slots:
+    for plan in plans:
+        slot_name = plan.slot_name
+        sec = by_index.get(plan.section_index)
+        sec_title = sec.title if sec else f"Sezione {plan.section_index}"
+        role = PLACEMENT_TO_ROLE.get(plan.placement, "inline")
         with st.container(border=True):
-            role = getattr(slot, "role", "inline")
-            st.markdown(f"### Slot: `{slot.name}` · {_ROLE_BADGE.get(role, role)}")
-            st.caption(slot.description)
+            st.markdown(
+                f"### {sec_title} → {_PLACEMENT_LABELS[plan.placement]}"
+            )
+            st.caption(f"slot: `{slot_name}`")
 
             choice = st.radio(
                 "Cosa vuoi fare?",
                 ["skip", "upload", "generate"],
-                index=["skip", "upload", "generate"].index(choices.get(slot.name, "skip")),
+                index=["skip", "upload", "generate"].index(choices.get(slot_name, "skip")),
                 horizontal=True,
-                key=f"choice_{slot.name}",
+                key=f"choice_{slot_name}",
                 format_func=lambda x: {"skip": "🚫 Salta", "upload": "📤 Carica", "generate": "✨ Genera"}[x],
             )
-            choices[slot.name] = choice
+            choices[slot_name] = choice
 
             if choice == "upload":
                 uploaded = st.file_uploader(
                     "Carica immagine (jpg/png)",
                     type=["jpg", "jpeg", "png"],
-                    key=f"upload_{slot.name}",
+                    key=f"upload_{slot_name}",
                 )
                 if uploaded is not None:
-                    images[slot.name] = uploaded.getvalue()
-                    st.image(images[slot.name], use_container_width=True)
-                elif slot.name in images:
-                    st.image(images[slot.name], use_container_width=True)
+                    images[slot_name] = uploaded.getvalue()
+                    st.image(images[slot_name], use_container_width=True)
+                elif slot_name in images:
+                    st.image(images[slot_name], use_container_width=True)
                     st.caption("(immagine già caricata)")
 
             elif choice == "generate":
-                prompt_default = prompts.get(slot.name) or slot.description
+                default_prompt = (
+                    prompts.get(slot_name)
+                    or f"Image for section '{sec_title}', alt: {plan.alt_text}"
+                )
                 prompt_value = st.text_area(
                     "Prompt gpt-image-1",
-                    value=prompt_default,
+                    value=default_prompt,
                     height=100,
-                    key=f"prompt_{slot.name}",
+                    key=f"prompt_{slot_name}",
                 )
-                prompts[slot.name] = prompt_value
+                prompts[slot_name] = prompt_value
                 quality = st.selectbox(
                     "Qualità",
                     ["high", "medium", "low"],
                     index=1,
-                    key=f"quality_{slot.name}",
+                    key=f"quality_{slot_name}",
                     help="**high** ≈ €0.25 · **medium** ≈ €0.07 · **low** ≈ €0.02",
                 )
-                aspect = aspect_for_slot(slot.name, role=getattr(slot, "role", None))
+                aspect = aspect_for_slot(slot_name, role=role)
                 st.caption(f"Aspect ratio: `{aspect}` (auto in base al ruolo)")
 
-                if st.button(f"✨ Genera `{slot.name}`", key=f"gen_{slot.name}"):
+                if st.button(f"✨ Genera `{slot_name}`", key=f"gen_{slot_name}"):
                     if not OPENAI_API_KEY:
                         st.error("OPENAI_API_KEY non configurata nei secrets.")
                     else:
-                        with st.spinner(f"gpt-image-1 → {slot.name} ({quality})…"):
+                        with st.spinner(f"gpt-image-1 → {slot_name} ({quality})…"):
                             try:
                                 img_bytes = generate_image(
                                     prompt_value,
@@ -879,11 +1040,11 @@ def _step_images() -> None:
                                     aspect=aspect,
                                     quality=quality,
                                 )
-                                images[slot.name] = img_bytes
+                                images[slot_name] = img_bytes
                                 _log_event(
                                     "slot_image_generated",
                                     payload={
-                                        "slot": slot.name,
+                                        "slot": slot_name,
                                         "quality": quality,
                                         "image_kb": len(img_bytes) // 1024,
                                     },
@@ -895,20 +1056,20 @@ def _step_images() -> None:
                                     f"Unexpected error: {e}\n\n{traceback.format_exc()}"
                                 )
 
-                if slot.name in images:
-                    st.image(images[slot.name], use_container_width=True)
+                if slot_name in images:
+                    st.image(images[slot_name], use_container_width=True)
             else:
-                images.pop(slot.name, None)
+                images.pop(slot_name, None)
 
     st.session_state.slot_choices = choices
     st.session_state.slot_images = images
     st.session_state.slot_prompts = prompts
 
-    cols = st.columns([1, 4])
-    if cols[0].button("⬅️ Genera HTML"):
-        _set_step("generate")
+    cols = st.columns([1, 1, 3])
+    if cols[0].button("⬅️ Pianifica"):
+        _set_step("section_plan")
         st.rerun()
-    if cols[1].button("👁 Anteprima → Pubblica", type="primary"):
+    if cols[2].button("👁 Anteprima → Pubblica", type="primary"):
         _set_step("preview")
         st.rerun()
 
@@ -920,9 +1081,24 @@ def _kept_slots() -> set[str]:
 
 
 def _compiled_html() -> str:
-    """Return the HTML with `<img>` tags for skipped slots removed."""
+    """Return the HTML with operator-placed images injected per section,
+    PLUS Claude-declared slots cleaned (skipped slots removed)."""
     landing: LandingPage = st.session_state.landing
-    return strip_skipped_image_slots(landing.html, _kept_slots())
+    images: dict[str, bytes] = st.session_state.get("slot_images") or {}
+    # 1. Pulisci eventuali slot dichiarati da Claude e non riempiti
+    base_html = strip_skipped_image_slots(landing.html, _kept_slots())
+    # 2. Applica i placement per-sezione decisi dall'operatore
+    plans = _state_to_placements(st.session_state.get("image_placements") or [])
+    if not plans:
+        return base_html
+
+    def resolver(slot_name: str) -> str | None:
+        # In compiled-final usiamo il filename relativo che verrà committato
+        if images.get(slot_name):
+            return f"img-{slot_name}.jpg"
+        return None
+
+    return apply_image_placements(base_html, plans, resolver)
 
 
 def _compiled_html_for_preview() -> str:
@@ -1208,6 +1384,8 @@ elif step == "content":
     _step_content()
 elif step == "generate":
     _step_generate()
+elif step == "section_plan":
+    _step_section_plan()
 elif step == "images":
     _step_images()
 elif step == "preview":
