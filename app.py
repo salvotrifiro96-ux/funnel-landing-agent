@@ -1257,12 +1257,17 @@ def _step_preview() -> None:
         st.session_state.slot_choices = {}
         st.session_state.slot_images = {}
         st.session_state.slot_prompts = {}
+        st.session_state.image_placements = []
         _set_step("generate")
         st.rerun()
-    if landing.image_slots:
-        if cols[2].button("🖼 Gestisci immagini"):
+    if cols[2].button("🖼 Gestisci immagini"):
+        # Se ho già un piano, vai direttamente al carica/genera;
+        # altrimenti porta alla pianificazione sezioni.
+        if st.session_state.get("image_placements"):
             _set_step("images")
-            st.rerun()
+        else:
+            _set_step("section_plan")
+        st.rerun()
     if cols[3].button("🚀 Pubblica su GitHub Pages", type="primary"):
         _publish()
 
