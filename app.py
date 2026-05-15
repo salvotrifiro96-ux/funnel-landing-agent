@@ -35,6 +35,7 @@ from agent.landing_gen import (
     strip_skipped_image_slots,
 )
 from agent.orch_link import linked_project_id, save_to_project_button, sidebar_project_picker
+from agent.store import LandingRow, LandingStore
 from agent.usage_log import ensure_schema as _ensure_usage_schema, log_event as _log_event
 
 load_dotenv()
@@ -94,6 +95,8 @@ DEFAULT_STATE: dict[str, object] = {
     "hosting_mode": "quick",     # 'quick' or 'custom'
     "hosting_custom": None,      # dict when mode='custom' and verified
     "hosting_setup_result": None,  # SetupResult when 'custom' verified
+    "loaded_landing_id": None,   # id archivio caricato
+    "_archive_action": None,     # dict {kind:'load'|'delete', id:...}
 }
 for k, v in DEFAULT_STATE.items():
     if k not in st.session_state:
@@ -103,6 +106,136 @@ for k, v in DEFAULT_STATE.items():
 def _set_step(s: str) -> None:
     st.session_state.step = s
     st.session_state.error = None
+
+
+def _store() -> LandingStore | None:
+    if "_landing_store" not in st.session_state:
+        try:
+            st.session_state._landing_store = LandingStore.from_env()
+        except Exception:
+            st.session_state._landing_store = None
+    return st.session_state._landing_store
+
+
+def _brief_partial_serializable() -> dict[str, object]:
+    """brief_partial pulito da bytes (uploaded_assets.asset_bytes)."""
+    bp = dict(st.session_state.get("brief_partial") or {})
+    ua = dict(bp.get("uploaded_assets") or {})
+    ua.pop("asset_bytes", None)
+    if ua:
+        bp["uploaded_assets"] = ua
+    elif "uploaded_assets" in bp:
+        bp.pop("uploaded_assets", None)
+    return bp
+
+
+def _archive_save_current() -> None:
+    store = _store()
+    landing_obj = st.session_state.get("landing")
+    if store is None or landing_obj is None:
+        return
+    bp = _brief_partial_serializable()
+    publish_result = st.session_state.get("publish_result")
+    publish_dict: dict[str, object] | None = None
+    if publish_result is not None:
+        publish_dict = {
+            "public_url": getattr(publish_result, "public_url", ""),
+            "html_commit_sha": getattr(publish_result, "html_commit_sha", ""),
+        }
+    try:
+        saved = store.save_landing(
+            client_name=bp.get("client_name", "") or "",
+            slug=bp.get("slug", "") or "",
+            page_title=getattr(landing_obj, "page_title", "") or "",
+            meta_description=getattr(landing_obj, "meta_description", "") or "",
+            html=getattr(landing_obj, "html", "") or "",
+            brief_dict=bp,
+            slot_choices=dict(st.session_state.get("slot_choices") or {}),
+            slot_prompts=dict(st.session_state.get("slot_prompts") or {}),
+            publish_result=publish_dict,
+        )
+        st.session_state.loaded_landing_id = saved.id
+    except Exception as e:
+        st.warning(f"⚠️ Landing salvata ma archivio non aggiornato: {e}")
+
+
+def _format_archive_ts(iso_string: str) -> str:
+    try:
+        from datetime import datetime as _dt
+        return _dt.fromisoformat(iso_string.replace("Z", "+00:00")).strftime("%d/%m %H:%M")
+    except Exception:
+        return iso_string[:16]
+
+
+def _render_archive_sidebar() -> None:
+    store = _store()
+    st.sidebar.header("📚 Archivio landing")
+    if store is None:
+        st.sidebar.warning(
+            "⚠️ Archivio disabilitato: aggiungi `SUPABASE_URL` e "
+            "`SUPABASE_SECRET_KEY` nei Secrets di Streamlit Cloud "
+            "(Settings → Secrets)."
+        )
+        st.sidebar.divider()
+        return
+    try:
+        rows = store.list_recent(limit=30)
+    except Exception as e:
+        st.sidebar.error(f"Errore archivio: {e}")
+        return
+    if not rows:
+        st.sidebar.caption("_Nessuna landing salvata ancora._")
+        return
+    if (loaded := st.session_state.get("loaded_landing_id")):
+        st.sidebar.caption(f"📌 Visualizzo `{loaded[:8]}…`")
+    for row in rows:
+        with st.sidebar.expander(f"{_format_archive_ts(row.created_at)} — {row.title[:60]}"):
+            published = bool((row.payload.get("publish_result") or {}).get("public_url"))
+            st.caption(f"id: `{row.id[:8]}…` · {'🟢 pubblicata' if published else '⏳ draft'}")
+            c1, c2 = st.columns(2)
+            if c1.button("📥 Apri", key=f"open_{row.id}", use_container_width=True):
+                st.session_state._archive_action = {"kind": "load", "id": row.id}
+                st.rerun()
+            if c2.button("🗑", key=f"del_{row.id}", use_container_width=True):
+                st.session_state._archive_action = {"kind": "delete", "id": row.id}
+                st.rerun()
+    st.sidebar.divider()
+
+
+def _apply_archive_action() -> None:
+    action = st.session_state.pop("_archive_action", None)
+    if not action:
+        return
+    store = _store()
+    if store is None:
+        return
+    try:
+        if action["kind"] == "load":
+            row = store.get(action["id"])
+            if row is None:
+                st.warning("Landing non trovata in archivio.")
+                return
+            payload = row.payload
+            from agent.landing_gen import LandingPage as _LP
+            st.session_state.landing = _LP(
+                html=payload.get("html", ""),
+                page_title=payload.get("page_title", ""),
+                meta_description=payload.get("meta_description", ""),
+                image_slots=(),
+            )
+            st.session_state.brief_partial = payload.get("brief", {}) or {}
+            st.session_state.slot_choices = payload.get("slot_choices", {}) or {}
+            st.session_state.slot_prompts = payload.get("slot_prompts", {}) or {}
+            st.session_state.slot_images = {}
+            st.session_state.publish_result = None
+            st.session_state.loaded_landing_id = row.id
+            st.session_state.step = "preview"
+        elif action["kind"] == "delete":
+            store.delete(action["id"])
+            if st.session_state.get("loaded_landing_id") == action["id"]:
+                st.session_state.loaded_landing_id = None
+    except Exception as e:
+        st.warning(f"Archivio: {e}")
 
 
 def _show_error_if_any() -> None:
@@ -223,6 +356,8 @@ def _hosting_sidebar() -> None:
 
 
 def _sidebar() -> None:
+    _render_archive_sidebar()
+    _apply_archive_action()
     _hosting_sidebar()
     sidebar_project_picker()
     st.sidebar.divider()
@@ -616,6 +751,7 @@ def _step_generate() -> None:
                             "html_kb": len(landing.html) // 1024,
                         },
                     )
+                    _archive_save_current()
                     st.rerun()
                 except Exception as e:
                     st.session_state.error = f"Generation failed: {e}\n\n{traceback.format_exc()}"
@@ -1007,6 +1143,7 @@ def _publish() -> None:
                     "html_commit_sha": result.html_commit_sha,
                 },
             )
+            _archive_save_current()
             _set_step("done")
             st.rerun()
         except Exception as e:
