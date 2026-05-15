@@ -26,13 +26,23 @@ DEFAULT_ASPECT_BY_SLOT: dict[str, str] = {
     "team": "1:1",
 }
 
+# Banner e background ricoprono tutta la larghezza, hanno senso solo in
+# orizzontale. Il role override l'euristica sul nome.
+ASPECT_BY_ROLE: dict[str, str] = {
+    "banner": "16:9",
+    "background": "16:9",
+}
+
 
 class ImageGenError(RuntimeError):
     pass
 
 
-def aspect_for_slot(slot_name: str) -> str:
-    """Pick a default aspect ratio based on slot name; falls back to 1:1."""
+def aspect_for_slot(slot_name: str, role: str | None = None) -> str:
+    """Pick a default aspect ratio. Role (banner/background) wins over the
+    name-based heuristic — a 'speaker' banner is still 16:9."""
+    if role and role in ASPECT_BY_ROLE:
+        return ASPECT_BY_ROLE[role]
     return DEFAULT_ASPECT_BY_SLOT.get(slot_name.lower(), "1:1")
 
 

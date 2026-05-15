@@ -813,9 +813,16 @@ def _step_images() -> None:
     images: dict[str, bytes] = dict(st.session_state.slot_images)
     prompts: dict[str, str] = dict(st.session_state.slot_prompts)
 
+    _ROLE_BADGE = {
+        "banner": "📐 Banner full-width",
+        "background": "🖼 Sfondo sezione",
+        "inline": "🧩 Inline",
+    }
+
     for slot in landing.image_slots:
         with st.container(border=True):
-            st.markdown(f"### Slot: `{slot.name}`")
+            role = getattr(slot, "role", "inline")
+            st.markdown(f"### Slot: `{slot.name}` · {_ROLE_BADGE.get(role, role)}")
             st.caption(slot.description)
 
             choice = st.radio(
@@ -857,8 +864,8 @@ def _step_images() -> None:
                     key=f"quality_{slot.name}",
                     help="**high** ≈ €0.25 · **medium** ≈ €0.07 · **low** ≈ €0.02",
                 )
-                aspect = aspect_for_slot(slot.name)
-                st.caption(f"Aspect ratio: `{aspect}` (auto)")
+                aspect = aspect_for_slot(slot.name, role=getattr(slot, "role", None))
+                st.caption(f"Aspect ratio: `{aspect}` (auto in base al ruolo)")
 
                 if st.button(f"✨ Genera `{slot.name}`", key=f"gen_{slot.name}"):
                     if not OPENAI_API_KEY:

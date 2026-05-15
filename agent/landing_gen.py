@@ -8,6 +8,7 @@ form HTML verbatim.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from anthropic import Anthropic
 
@@ -48,10 +49,14 @@ class LandingBrief:
     trustbar_logo_filenames: tuple[str, ...] = ()
 
 
+SlotRole = Literal["banner", "background", "inline"]
+
+
 @dataclass(frozen=True)
 class ImageSlot:
     name: str          # snake_case, e.g. "hero", "speaker", "benefit_1"
     description: str   # short visual brief — fed to gpt-image-1 if user chooses generate
+    role: SlotRole = "inline"  # "banner" = full-width strip; "background" = section bg cover; "inline" = inline <img>
 
 
 @dataclass(frozen=True)
@@ -80,15 +85,40 @@ def _system_prompt() -> str:
         "minimal vanilla JS only if needed (e.g., FAQ accordion, smooth scroll).\n"
         "3. Embeds the operator's form HTML EXACTLY as provided — never change "
         "field names, action, method, hidden inputs, or button text.\n"
-        "4. Identifies up to 6 sections where an image would meaningfully boost "
-        "conversion (hero, speaker portrait, top benefits, testimonial avatar, "
-        "bonus visual, etc.) and includes for each one an <img> tag of the form:\n"
-        "   <img src=\"img-<slot>.jpg\" alt=\"...\" data-img-slot=\"<slot>\" class=\"...\">\n"
-        "where <slot> is a short snake_case name. The page must also work "
-        "WITHOUT those images (the operator may skip any slot) — so size and "
-        "position the <img>s so that removing them does not break the layout. "
-        "Use `bg-gradient-to-*` / color blocks as graceful fallback in case the "
-        "image is skipped. NEVER reference any image other than img-<slot>.jpg.\n"
+        "4. For EVERY major content section of the landing (hero, problem, "
+        "solution, mechanism, proof, bonuses, CTA, FAQ, footer-cta, …) you MUST "
+        "reserve an optional image slot, UNLESS the section is structurally "
+        "incompatible with an image (e.g. a pure trustbar of logos or a thin "
+        "divider). Each slot is one of THREE roles:\n"
+        "   • role=\"banner\"     — a full-width image strip BETWEEN sections "
+        "(no overlay text). Render it as a standalone <section>:\n"
+        "       <section class=\"my-12 sm:my-16\">\n"
+        "         <img src=\"img-<slot>.jpg\" alt=\"...\" data-img-slot=\"<slot>\" "
+        "data-img-role=\"banner\" class=\"w-full h-auto block\">\n"
+        "       </section>\n"
+        "   • role=\"background\" — image is the SECTION background (16:9 "
+        "cover with overlay text). Render with a wrapper:\n"
+        "       <section class=\"relative isolate overflow-hidden\" "
+        "data-section-bg=\"<slot>\">\n"
+        "         <img src=\"img-<slot>.jpg\" alt=\"\" aria-hidden=\"true\" "
+        "data-img-slot=\"<slot>\" data-img-role=\"background\" "
+        "class=\"absolute inset-0 -z-10 h-full w-full object-cover\">\n"
+        "         <div class=\"absolute inset-0 -z-10 bg-black/50\"></div>\n"
+        "         <!-- section content with white text or backdrop-blur card -->\n"
+        "       </section>\n"
+        "   • role=\"inline\"     — image inline within a section, next to or "
+        "above text (e.g. speaker portrait beside bio, mockup over feature "
+        "list). Render with the existing classic <img> tag:\n"
+        "       <img src=\"img-<slot>.jpg\" alt=\"...\" data-img-slot=\"<slot>\" "
+        "data-img-role=\"inline\" class=\"...\">\n"
+        "Choose the role per slot based on WHAT FITS the content: hero usually "
+        "= background, transitions between long blocks = banner, portraits / "
+        "mockups / icons-as-photo = inline. The page MUST work WITHOUT any of "
+        "these images (the operator may skip any) — design fallbacks so that "
+        "removing an <img> (banner or inline) or removing the background image "
+        "does not break the layout. For sections with role=\"background\", "
+        "fallback is the dark overlay div + brand gradient. NEVER reference "
+        "any image other than img-<slot>.jpg.\n"
         "5. Configures Tailwind with an inline `tailwind.config` mapping the "
         "provided primary/secondary/accent colors to `brand-primary`, etc.\n"
         "6. Loads the chosen Google Font and applies it as the body font.\n"
@@ -121,8 +151,11 @@ def _system_prompt() -> str:
         "===META_DESCRIPTION===\n"
         "<meta description, ≤ 155 chars, written for click-through>\n"
         "===IMAGE_SLOTS===\n"
-        "<one slot per line — `slot_name | short visual description for image gen`>\n"
-        "<example: `hero | warm editorial photo of italian entrepreneur at desk, AI dashboards on screen, soft natural light`>\n"
+        "<one slot per line — `slot_name | role | short visual description for image gen`>\n"
+        "<role MUST be exactly one of: banner, background, inline>\n"
+        "<example: `hero | background | warm editorial photo of italian entrepreneur at desk, AI dashboards on screen, soft natural light`>\n"
+        "<example: `between_promise_and_proof | banner | wide horizontal photo of a packed live event, audience seen from the stage, warm tungsten lighting`>\n"
+        "<example: `speaker | inline | three-quarter portrait of speaker, neutral studio backdrop`>\n"
         "<list ONLY the slots you actually used in the HTML; if none, leave a single line: `(none)`>\n"
         "===HTML===\n"
         "<!DOCTYPE html>\n"
@@ -289,8 +322,16 @@ _HTML_DELIM = "===HTML==="
 _END_DELIM = "===END==="
 
 
+_VALID_ROLES: set[str] = {"banner", "background", "inline"}
+
+
 def _parse_image_slots(block: str) -> tuple[ImageSlot, ...]:
-    """Parse the IMAGE_SLOTS block: one `name | description` per line."""
+    """Parse the IMAGE_SLOTS block.
+
+    Accepts either:
+      - `name | role | description`   (preferred, role ∈ banner/background/inline)
+      - `name | description`          (legacy, role defaults to 'inline')
+    """
     slots: list[ImageSlot] = []
     for raw_line in block.splitlines():
         line = raw_line.strip()
@@ -298,11 +339,19 @@ def _parse_image_slots(block: str) -> tuple[ImageSlot, ...]:
             continue
         if "|" not in line:
             continue
-        name_raw, desc = line.split("|", 1)
-        name = name_raw.strip().lower().replace(" ", "_")
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) >= 3 and parts[1].lower() in _VALID_ROLES:
+            name_raw, role_raw, desc_parts = parts[0], parts[1].lower(), parts[2:]
+            desc = " | ".join(desc_parts).strip()
+            role: SlotRole = role_raw  # type: ignore[assignment]
+        else:
+            name_raw = parts[0]
+            desc = " | ".join(parts[1:]).strip()
+            role = "inline"
+        name = name_raw.lower().replace(" ", "_")
         if not name:
             continue
-        slots.append(ImageSlot(name=name, description=desc.strip()))
+        slots.append(ImageSlot(name=name, description=desc, role=role))
     # Dedupe while preserving order.
     seen: set[str] = set()
     unique: list[ImageSlot] = []
@@ -366,9 +415,16 @@ def _parse_delimited(text: str) -> LandingPage:
 def strip_skipped_image_slots(html: str, kept_slots: set[str]) -> str:
     """Remove `<img ... data-img-slot="X" ...>` tags whose slot is not kept.
 
-    Conservative: only touches the <img> tag itself, leaves surrounding
-    markup intact. Claude is instructed to size sections so removal does
-    not break the layout.
+    Per role:
+      - banner   → rimuove l'`<img>` (Claude lo ha messo dentro un
+                   `<section class="my-12">`, che resta vuoto e si collassa
+                   coi margin — accettabile come fallback);
+      - background → rimuove l'`<img>` ma lascia l'overlay div: la sezione
+                     conserva il colore di overlay come fallback;
+      - inline   → rimuove solo l'`<img>`.
+
+    Conservative: tocca solo i tag <img>, non i loro wrapper. Claude e`
+    istruito a designare layout che si compongono anche senza l'immagine.
     """
     import re
 
@@ -433,7 +489,36 @@ def revise_landing(
         "(===PAGE_TITLE=== / ===META_DESCRIPTION=== / ===IMAGE_SLOTS=== / "
         "===HTML=== / ===END===). Tutto ciò che il feedback non menziona "
         "deve restare identico — testo, classi Tailwind, struttura, slot "
-        "immagine. Non aggiungere sezioni che il feedback non chiede."
+        "immagine. Non aggiungere sezioni che il feedback non chiede.\n\n"
+        "## Linee guida specifiche per modifiche di LAYOUT/TYPOGRAFIA\n"
+        "Quando l'operatore chiede modifiche al modo in cui IL TESTO E` "
+        "DISPOSTO (numero di righe, dimensione, allineamento, line-height, "
+        "spaziatura), NON limitarti a riformulare la frase: applica modifiche "
+        "ATOMICHE all'HTML/Tailwind in modo che il risultato sia VISIBILE.\n"
+        "Esempi specifici:\n"
+        "  • \"metti la headline su N righe\" → due strade combinabili:\n"
+        "      (a) inserisci esplicitamente uno o più tag <br> nei punti "
+        "naturali di pausa (`Prima riga<br>Seconda riga`) per forzare il "
+        "wrap su desktop;\n"
+        "      (b) restringi la `max-w-*` dell'elemento contenitore in modo "
+        "che il wrap naturale produca esattamente N righe a viewport "
+        "desktop (es. h1: `max-w-3xl` per ~2 righe, `max-w-2xl` per ~3 "
+        "righe, sempre con `mx-auto` se centrata);\n"
+        "      (c) se serve, accorcia il testo della headline per stare in "
+        "N righe — ma SOLO se l'operatore lo chiede o se senza accorciarla "
+        "il wrap non funziona.\n"
+        "  • \"più grande / più piccola\" → cambia `text-*` (es. da "
+        "`text-4xl md:text-6xl` a `text-5xl md:text-7xl`).\n"
+        "  • \"più spazio sopra/sotto\" → cambia `mt-*` / `mb-*` o `py-*` "
+        "della sezione.\n"
+        "  • \"centra / allinea a sinistra\" → cambia `text-center` / "
+        "`text-left` (e relative `items-*` sul flex container).\n"
+        "  • \"colore in X\" → cambia la classe Tailwind di colore "
+        "(`text-brand-primary`, `bg-brand-accent`, ecc.) — NON usare colori "
+        "inline `style=`.\n"
+        "Se l'operatore dice \"non lo fa\" significa che la modifica "
+        "precedente non era visibile a video: applica modifiche più "
+        "decise (es. forza `<br>` invece di sperare nel wrap naturale)."
     )
     return _stream_to_landing(client, _system_prompt(), user_msg)
 
